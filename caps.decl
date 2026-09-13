@@ -1,0 +1,51 @@
+# libpdx-font — caps.decl
+#
+# Wave: R102 (softarch userland graphical stack), Wave CC
+# Doc:  design/graphics/r102-user-plan.md §2.1 / §4.1 in the paideia-os
+#       repo (R102.M1-001, this repo's issue #1).
+#
+# Format: modern list-form grammar (`requires:` / `declares_output_
+# schemas:`), matching the 2026-09 convention landed across shell,
+# libpdx-argv, rm, cp, mv, mkdir, libpdx-audit, libpdx-elevate — not
+# the older R90-XREPO.013.M1-001 line-oriented `!KIND_FOO <mask>`
+# grammar mkfs.pdxfs / mount.pdxfs still carry from their Sept-5
+# vintage.
+#
+# libpdx-font is a linked library: it holds no exec-time capability
+# grant of its own (a `caps.decl` gate fires at `sys_exec_reconcile_
+# caps` for a PROCESS, not for a statically-linked library object).
+# It is declared here anyway, matching this issue's explicit scaffold
+# contract, to record the identity-attribution posture every linking
+# executable inherits: KIND_USER (invoker attribution) is the one row
+# every consumer of this library is expected to already hold, mirroring
+# the mkfs.pdxfs / rm convention of naming KIND_USER even though the
+# actual grant flows through the linking executable's own manifest at
+# exec time, not through this repo's build output.
+#
+# I/O posture. `FontMetrics::font_emit_metrics_record` (M2-003, #5)
+# issues one raw `sys_write(fd=2, ...)` diagnostic per call. This is
+# the same carve-out libpdx-argv's `caps.decl` documents for
+# `VersionBackend::emit_default` / `HelpBackend::emit_from_argspec`
+# (both raw fd-1 sys_writes): the syscall inherits whatever fd-2
+# authority the LINKING EXECUTABLE already holds at the process
+# boundary, not a capability this library mints or requires on its
+# own. A consumer whose own `caps.decl` lacks a cap covering fd 2 sees
+# the write fail (EBADF) and `font_emit_metrics_record` returns the
+# raw syscall result either way — no capability check happens inside
+# this library. Every other entry point (`FontApi::font_lookup_glyph`
+# / `font_glyph_bitmap` / `font_measure_text`, `Font8x16::
+# font_8x16_bitmap_ptr`, `FontLayout::font_layout_text`) touches only
+# caller-supplied buffers and this library's own embedded .rodata
+# glyph table — no syscall, no capability surface at all.
+requires:
+  - KIND_USER
+
+# No output schema declared at 0.5.0. MetricsRecord@0.1 (M2-003) is
+# emitted as a raw diagnostic byte blob on fd 2, not as a semantic-pipe
+# schema frame — it has no producer registered via a `schema_emit_
+# register`-style call, and no consumer schema-invoke path decodes it
+# from a caller. Promoting it to a real declared output schema (with a
+# magic tag + schema-name registration, mirroring libpdx-argv's
+# PdxArgvParseErrorRecord@0.1) is M3 work per this repo's README
+# milestone table.
+declares_output_schemas: []

@@ -1,0 +1,163 @@
+// src/font_8x16.pdx — libpdx-font R102.M2-001 (Closes libpdx-font#3)
+//
+// Embedded 8x16 bitmap glyph store: a 4096-byte .rodata blob (256
+// glyphs x 16 rows x 1 byte/row) plus a leaf accessor
+// font_8x16_bitmap_ptr(cp) that returns the rip-relative address of
+// one glyph's 16-byte row table.
+//
+// ==============================================================================
+// Provenance — why this is NOT a bit-exact import from fb_font.pdx
+// ==============================================================================
+//
+// The issue text asks to "Import the 256-glyph 8x16 monospace table
+// from paideia-os/src/kernel/gfx/fb_font.pdx". Two corrections found
+// during implementation:
+//
+//   1. The file actually lives at
+//      paideia-os/src/kernel/core/drivers/fb_font.pdx (not gfx/).
+//
+//   2. fb_font.pdx does NOT carry glyph pixel data inline — it embeds
+//      assets/fonts/vga8x16.bin via @include_bytes. That asset was
+//      byte-inspected at paideia-os HEAD (commit ae011e2) and is a
+//      PLACEHOLDER: bytes 0x000..0x20F are all zero, and ASCII
+//      0x21..0x7E get a flat 0xAA/0x55 alternating-row stripe — not
+//      real letterforms. fb_font.pdx's own header says as much
+//      ("R23.M1 asset content:... placeholder alternating-row
+//      pattern"; "R23.M2 replaces the asset with actual... vgacon-
+//      8x16 glyph data" — that R23.M2 landing has not happened yet).
+//
+// A bit-exact import is therefore impossible today: there is no real
+// glyph data upstream to import. Rather than fabricate a synthetic
+// placeholder ourselves (the wave's documented fallback — "hardcode a
+// small char-set... and document the gap"), this module instead
+// vendors a REAL, public-domain 8x16 VGA console font: the glyph
+// table from Debian/Ubuntu's `kbd` / `console-setup` package,
+// specifically `/usr/share/consolefonts/Lat15-VGA16.psf.gz`. That
+// package's own copyright file states plainly: "All console fonts
+// are public domain by nature" (/usr/share/doc/console-setup/
+// copyright). The file is PSF1 format: a 4-byte header (magic 0x36
+// 0x04, mode 0x02 = PSF1_MODEHASTAB, charsize 0x10 = 16 rows) followed
+// immediately by 256 glyphs x 16 bytes = 4096 bytes of bitmap data,
+// then a Unicode mapping table this module does not need. The 4096
+// glyph bytes were extracted verbatim (offset 4..4100) into
+// assets/fonts/glyphs_8x16.bin — same 8-bit-row / 256-glyph / MSB-
+// left layout fb_font.pdx itself specifies, and visually verified
+// (codepoints 'A'=0x41, '@'=0x40, 'g'=0x67 render as recognizable
+// glyphs when the row bytes are printed as a bitmap).
+//
+// This means: real, correct, full-range (ASCII + Latin-15) glyph
+// pixel data ships today, but it is NOT byte-identical to whatever
+// paideia-os eventually lands in fb_font.pdx at R23.M2. Follow-up:
+// once R23.M2 replaces vga8x16.bin with its own real glyph data, a
+// future libpdx-font issue should compare the two and, if paideia-os
+// standardises on a specific font (rather than "any correct 8x16
+// VGA font"), re-sync onto that exact byte source for kernel/user
+// glyph parity. Until then this is real, usable glyph data — a
+// strict improvement over both the upstream placeholder and an
+// ASCII-only synthetic fallback.
+//
+// ==============================================================================
+// Layout (identical to fb_font.pdx's own documented layout)
+// ==============================================================================
+//
+// _font_8x16_glyphs : [u8; 4096]
+//   Row-major, glyph-major. Byte at offset (glyph_idx * 16 + row_idx)
+//   holds the 8-pixel bitmap for row `row_idx` (0 = top) of glyph
+//   `glyph_idx`. Bit 7 (0x80) is the leftmost pixel; bit 0 (0x01) is
+//   the rightmost. A set bit is foreground; a clear bit is background
+//   (the caller's rasterizer decides colors).
+//
+// @align(64) — mirrors fb_font.pdx's cacheline-alignment rationale:
+// 16 rows/glyph fit exactly in one 64-byte cacheline, so no glyph-row
+// byte-load ever straddles a cacheline boundary.
+//
+// ==============================================================================
+// font_8x16_bitmap_ptr(cp) — leaf accessor
+// ==============================================================================
+//
+// Contract: returns the address of glyph `cp`'s 16-byte row table
+// (NOT a dereferenced byte — the caller reads however many row bytes
+// it needs from the returned pointer). Caller must pass cp ∈ [0..256);
+// out-of-range cp walks off the 4096-byte array into whatever .rodata
+// neighbor lives next, same undefined-but-non-faulting posture
+// fb_font.pdx's fb_font_row documents for its own out-of-range case.
+// Bounds-check discipline lives with the caller — FontApi::
+// font_glyph_bitmap (src/font_api.pdx) checks glyph_id < 256 before
+// ever calling this accessor.
+//
+// Address arithmetic: addr = &_font_8x16_glyphs + cp * 16
+//                          = &_font_8x16_glyphs + (cp << 4)
+//
+// Register discipline: leaf, no push/pop. SysV caller-save clobbers
+// only (rax, rdi). rdi is the input (SysV arg reg 0); its post-return
+// value is undefined (SysV caller-save).
+//
+// ==============================================================================
+// Instruction floor
+// ==============================================================================
+//
+// - lea r64, [rip + sym]      (R11 encoder)
+// - shl r64, imm8             (R11 encoder)
+// - add r64, r64              (R11 encoder)
+//
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// -------------------------------------------------------
+//   - Module Font8x16 (PascalCase basename matches src/font_8x16.pdx).
+//   - Leaf: no push/pop parity to preserve, no nested calls.
+//   - No test mnemonic, no cmp at all in this accessor (unconditional
+//     address math only).
+//   - No `and reg, imm64`. No 2-op imul (glyph*16 done via shl by 4).
+//   - Every pub let name here (FONT_8X16_*, _font_8x16_glyphs,
+//     font_8x16_bitmap_ptr) is checked against every other module in
+//     this repo for global-symbol uniqueness — paideia-as/this repo's
+//     link model treats `pub let` names as flat global symbols, NOT
+//     module-namespaced (see libpdx-argv's ENH-030 `reset`/`register`
+//     collision history for why this matters).
+
+module Font8x16 = structure {
+
+  // Byte counts (documentation constants; instruction bodies below
+  // use literal immediates with a trailing comment, matching the
+  // house convention — see fb_font.pdx / SchemaEmit::SCHEMA_MAX).
+  pub let FONT_8X16_GLYPHS      : u64 = 256
+  pub let FONT_8X16_ROWS_PER    : u64 = 16
+  pub let FONT_8X16_COLS_PER    : u64 = 8
+  pub let FONT_8X16_TOTAL_BYTES : u64 = 4096
+
+  // ==========================================================================
+  // _font_8x16_glyphs: 4096-byte embedded font blob (.rodata).
+  // ==========================================================================
+  //
+  // Path is relative to this .pdx file's directory (src/), matching
+  // fb_font.pdx's own @include_bytes resolution policy:
+  //
+  //   src/font_8x16.pdx                <-- this file
+  //   assets/fonts/glyphs_8x16.bin      <-- the blob
+  //
+  //   Relative from this file's dir: ../assets/fonts/glyphs_8x16.bin
+  //
+  // `pub` so downstream fixtures can assert its presence/size via
+  // `nm` (mirrors fb_font.pdx's own pub-symbol rationale).
+  pub let _font_8x16_glyphs : [u8; 4096] = @include_bytes("../assets/fonts/glyphs_8x16.bin") @align(64)
+
+  // ==========================================================================
+  // font_8x16_bitmap_ptr(cp) -> u64
+  // ==========================================================================
+  //
+  // Return the address of the 16-byte row table for glyph `cp`.
+  //
+  //   rdi (in)  = cp — codepoint / glyph index, expected ∈ [0..256)
+  //   rax (out) = &_font_8x16_glyphs + cp*16
+  // ==========================================================================
+  pub let font_8x16_bitmap_ptr : (u64) -> u64 !{mem} @{} =
+    fn (cp: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M2-001 (Closes libpdx-font#3): font_8x16_bitmap_ptr returns the rip-relative address of glyph `cp`'s 16-byte row table in _font_8x16_glyphs. Address math: lea rax, [rip + _font_8x16_glyphs] loads the blob base; shl rdi, 4 computes cp*16 (glyph pitch is 16 bytes, so a left-shift-by-4 replaces a multiply — no 2-op imul, per feedback_pdx_encoder_pitfalls); add rax, rdi adds the offset. Leaf: no push/pop, no nested calls, no branch labels (so no reserved-label prefix discipline applies). Caller-save only (rax, rdi touched; rdi's post-return value is undefined per SysV caller-save convention). Bounds discipline: cp >= 256 walks past the 4096-byte array end into whatever .rodata neighbor follows in the linked object — same undefined-but-non-faulting posture paideia-os's own fb_font.pdx documents for fb_font_row's out-of-range case. This accessor does not bounds-check; FontApi::font_glyph_bitmap (src/font_api.pdx) is the caller that checks cp < 256 before ever reaching here.",
+      block: {
+        lea rax, [rip + _font_8x16_glyphs];
+        shl rdi, 4;                         // cp * 16 (glyph pitch)
+        add rax, rdi;
+        ret
+      }
+    }
+}

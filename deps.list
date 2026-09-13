@@ -1,0 +1,21 @@
+# libpdx-font deps.list
+#
+# Wave:  R102, Wave CC
+# Doc:   design/graphics/r102-user-plan.md §2.1 in paideia-os.
+#
+# libpdx-font 0.5.0 has NO library dependencies. It is pure userspace:
+# FontApi/Font8x16/FontLayout read only caller-supplied buffers and
+# this library's own embedded .rodata glyph table; FontMetrics issues
+# one raw sys_write of its own (fd 2) rather than routing through
+# libpdx-semantic-pipe or libpdx-audit — promoting MetricsRecord@0.1
+# to a real declared schema over one of those libraries is M3 work
+# (see caps.decl's declares_output_schemas note).
+#
+# Format (mirrors design/tooling/plan.md §6.4 `deps.list` shape):
+#   <name>  <semver-lo>..<semver-hi>  <link-kind>
+# link-kind is one of: static, dynamic, shape.
+#
+# (No library entries.)
+
+# Toolchain floor (informational; enforced by pkg-install, not link):
+toolchain:paideia-as   >= 0.21.0   build

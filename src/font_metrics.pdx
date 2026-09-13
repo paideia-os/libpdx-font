@@ -1,0 +1,165 @@
+// src/font_metrics.pdx — libpdx-font R102.M2-003 (Closes libpdx-font#5)
+//
+// FontMetrics::font_emit_metrics_record writes one 128-byte
+// MetricsRecord@0.1 diagnostic to fd 2 (stderr).
+//
+// ==============================================================================
+// Wire layout — MetricsRecord@0.1 (128 bytes total)
+// ==============================================================================
+//
+//   offset  size  field            meaning
+//   ------  ----  ---------------  --------------------------------------
+//   0       4     version (u32)    MR_VERSION_V1 = 1
+//   4       4     op (u32)         caller-supplied opcode/kind discriminant
+//                                  (this library does not interpret it —
+//                                  it is a passthrough tag the caller
+//                                  defines, e.g. "glyph lookup" vs.
+//                                  "layout pass" vs. "flush")
+//   8       8     glyph_count      (u64) caller-supplied
+//   16      8     bytes_rendered   (u64) caller-supplied
+//   24      8     viewport_w       (u64) unpacked from viewport_wh_packed
+//   32      8     viewport_h       (u64) unpacked from viewport_wh_packed
+//   40      88    reserved[11]     11 x u64 = 88 bytes, zero-filled
+//   ------  ----
+//   128     total
+//
+// 4 + 4 + 8 + 8 + 8 + 8 + 88 = 128, matching the issue's literal
+// shape {version:u32, op:u32, glyph_count:u64, bytes_rendered:u64,
+// viewport_w/h:u64, reserved[11xu64]}.
+//
+// No magic tag and no schema-name registration at 0.5.0 — this is a
+// raw diagnostic byte blob on fd 2, not a semantic-pipe schema frame
+// (see caps.decl's declares_output_schemas note for why it is not
+// registered as a real output schema yet).
+//
+// ==============================================================================
+// Encoder-arity adaptation (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//
+// The issue's literal signature is font_emit_metrics_record(op,
+// glyph_count, bytes_rendered, viewport_w, viewport_h) — 5 curried
+// args, one past this repo's 4-arg ceiling (same discipline as
+// FontLayout::font_layout_text; see that file's header for the cp
+// pdxfs_txn_bind precedent this mirrors). viewport_w and viewport_h
+// are packed into one `viewport_wh_packed` u64 (w in the HIGH 32
+// bits, h in the LOW 32 bits) and unpacked with shr/shl+shr — no
+// `and reg, imm64`.
+//
+// ==============================================================================
+// I/O posture
+// ==============================================================================
+//
+// This function issues one raw sys_write(fd=2, ...) syscall. Per
+// caps.decl, this inherits whatever fd-2 authority the LINKING
+// EXECUTABLE already holds — this library requires no capability of
+// its own for the write (mirrors libpdx-argv's VersionBackend /
+// HelpBackend fd-1 carve-out). A consumer lacking fd-2 authority sees
+// the syscall fail (EBADF) and gets that raw negative value back in
+// rax; this function performs no capability check of its own.
+//
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// -------------------------------------------------------
+//   - Module FontMetrics (PascalCase basename matches src/font_metrics.pdx).
+//   - 4 curried args exactly (see arity note above).
+//   - Leaf: single sys_write at the very end, no CALL to another
+//     .pdx function — so no push/pop parity is needed (rsp%16==8 on
+//     entry holds throughout; the syscall's rcx/r11 clobber happens
+//     after every value it might have held is already copied out).
+//   - No test mnemonic (no branches at all in the happy path besides
+//     the fixed-count zero-pad loop, which uses cmp reg, imm).
+//   - No `and reg, imm64` (viewport unpack uses shr / shl+shr).
+//   - No 2-op imul, no neg.
+//   - u32 stores via mov_d (paideia-as W32-sized store; same idiom
+//     libpdx-argv's emit_parse_error and mkfs.pdxfs's
+//     mkfs_encrypt_apply_wrap use), always sourced from rax.
+//   - Every `pub let` name checked against Font8x16 / FontApi /
+//     FontLayout for global-symbol uniqueness (flat link namespace).
+//   - Reserved-label discipline: internal labels prefixed
+//     `font_metrics_`.
+
+module FontMetrics = structure {
+
+  pub let FONT_METRICS_VERSION_V1    : u64 = 1
+  pub let FONT_METRICS_RECORD_BYTES  : u64 = 128
+  pub let FONT_METRICS_FD_STDERR     : u64 = 2
+  pub let FONT_METRICS_SYSCALL_WRITE : u64 = 1
+
+  // Scratch buffer the record is built into before the single
+  // sys_write. Not reentrant (a caller from two threads/fibers would
+  // race this buffer) — acceptable for 0.5.0's diagnostic-only use;
+  // a future revision could take a caller-supplied buffer instead if
+  // concurrent emission becomes a real need.
+  pub let mut _font_metrics_scratch : [u8; 128] = uninit @align(8)
+
+  // ==========================================================================
+  // font_emit_metrics_record(op, glyph_count, bytes_rendered,
+  //                           viewport_wh_packed) -> u64
+  // ==========================================================================
+  //
+  //   rdi (in)  = op                 — caller-defined opcode/kind tag
+  //   rsi (in)  = glyph_count
+  //   rdx (in)  = bytes_rendered
+  //   rcx (in)  = viewport_wh_packed — w in bits [63:32], h in bits [31:0]
+  //   rax (out) = sys_write's raw return: FONT_METRICS_RECORD_BYTES
+  //               (128) on a full write, or a negative errno on
+  //               failure (e.g. -EBADF if fd 2 is not held)
+  //
+  // Register plan:
+  //   r11 = _font_metrics_scratch base (constant across the whole
+  //         call — every store below addresses [r11 + offset])
+  //   r9  = temp pointer for the reserved-region zero loop
+  //   r8  = zero-loop cursor
+  //   rax = per-field store scratch / final return value
+  // ==========================================================================
+  pub let font_emit_metrics_record : (u64, u64, u64, u64) -> u64 !{mem, sysreg} @{} =
+    fn (op: u64) (glyph_count: u64) (bytes_rendered: u64) (viewport_wh_packed: u64) -> unsafe {
+      effects: {mem, sysreg}, capabilities: {},
+      justification: "libpdx-font R102.M2-003 (Closes libpdx-font#5): font_emit_metrics_record builds a 128-byte MetricsRecord@0.1 in _font_metrics_scratch (see module header for the field-by-field wire layout) and writes it to fd 2 via raw sys_write (syscall id 1, same SYSCALL_WRITE constant every print/schema-emit module in this codebase's tree uses). r11 holds the scratch buffer's rip-relative base for the whole function (lea r11, [rip + _font_metrics_scratch] once, up front) — every field store addresses [r11 + offset]; r11 is only needed BEFORE the syscall (its value is copied into rsi ahead of the syscall instruction), so the SYSCALL-clobbers-r11 architectural fact is harmless here, same reasoning FontMetrics shares with every other fd-write trampoline in this tree. version (u32) and op (u32) are staged through rax and stored with mov_d (paideia-as W32-sized store; matches libpdx-argv's emit_parse_error / mkfs.pdxfs's encrypt_apply_wrap idiom of always sourcing a sized store from rax). glyph_count and bytes_rendered are plain 64-bit stores straight from rsi/rdx. viewport_wh_packed (rcx) is unpacked without `and reg,imm64`: viewport_w = rcx >> 32 (shr, logical, zero-fills); viewport_h = (rcx << 32) >> 32 (shl then shr clears the high 32 bits, leaving the low 32 zero-extended) — same shr/shl-pair idiom FontLayout::font_layout_text and libpdx-argv's emit_parse_error use for the identical reason. The reserved[11] region (88 bytes at offset 40) is zero-filled by an explicit byte loop (lea r9, [r11 + 40]; loop mov_b [r9+r8], 0) bounded by cmp r8, 88 (no test mnemonic) rather than assuming the .bss scratch starts zeroed on every call (a prior emission could have left nonzero bytes if this module's contract ever changes to reuse the tail for something else — zeroing explicitly costs 88 cheap iterations and removes that whole class of doubt). Final sequence stages rsi=buffer-base (copied out of r11 before the clobber), rdx=128, rdi=FONT_METRICS_FD_STDERR (2), rax=FONT_METRICS_SYSCALL_WRITE (1), then `syscall`; return value is rax verbatim, matching every other print/write trampoline's contract in this codebase (Print::print_str, VersionBackend::emit_default). sysreg effect declared for the syscall's architectural rcx/r11 clobber. No test mnemonic, no `and`, no 2-op imul, no neg anywhere in this body. Reserved-label prefix font_metrics_.",
+      block: {
+        lea r11, [rip + _font_metrics_scratch];
+
+        // version (u32) @ offset 0
+        mov rax, 1;                          // FONT_METRICS_VERSION_V1
+        mov_d [r11 + 0], rax;
+
+        // op (u32) @ offset 4
+        mov rax, rdi;
+        mov_d [r11 + 4], rax;
+
+        // glyph_count (u64) @ offset 8
+        mov [r11 + 8], rsi;
+
+        // bytes_rendered (u64) @ offset 16
+        mov [r11 + 16], rdx;
+
+        // viewport_w (u64) @ offset 24 -- high 32 bits of rcx
+        mov rax, rcx;
+        shr rax, 32;
+        mov [r11 + 24], rax;
+
+        // viewport_h (u64) @ offset 32 -- low 32 bits of rcx
+        mov rax, rcx;
+        shl rax, 32;
+        shr rax, 32;
+        mov [r11 + 32], rax;
+
+        // reserved[11] (88 bytes) @ offset 40 -- zero-fill
+        lea r9, [r11 + 40];
+        xor r8, r8;
+      font_metrics_zero_loop:
+        cmp r8, 88;
+        jae font_metrics_zero_done;
+        mov_b [r9 + r8], 0;
+        add r8, 1;
+        jmp font_metrics_zero_loop;
+
+      font_metrics_zero_done:
+        mov rsi, r11;                        // buf (copied out before the syscall clobbers r11)
+        mov rdx, 128;                        // FONT_METRICS_RECORD_BYTES
+        mov rdi, 2;                          // FONT_METRICS_FD_STDERR
+        mov rax, 1;                          // FONT_METRICS_SYSCALL_WRITE
+        syscall;
+        ret;
+      }
+    }
+}

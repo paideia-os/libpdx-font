@@ -1,0 +1,212 @@
+// src/font_api.pdx — libpdx-font R102.M1-002 (Closes libpdx-font#2)
+//
+// Public API: font_lookup_glyph, font_glyph_bitmap, font_measure_text.
+//
+// Scope note — stubs vs. real bodies. The issue text (M1-002) asks
+// for "public API stubs". Because #2 through #5 (M1-002 through
+// M2-003) all land in this one commit, these three entry points ship
+// as REAL bodies wired to Font8x16 (src/font_8x16.pdx, landed
+// alongside in the same commit) rather than as constant-returning
+// stubs that would be replaced two commits later in the same diff —
+// a stub-then-immediately-real churn adds no review value when both
+// halves land together. A future multi-face API (README's M5 "second
+// face 16x32") is the natural point where these signatures would grow
+// a face-id parameter; that is out of scope for 0.5.0's single
+// embedded 8x16 face.
+//
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// -------------------------------------------------------
+//   - Module FontApi (PascalCase basename matches src/font_api.pdx).
+//   - Every function <= 4 curried args (none needed packing here;
+//     font_glyph_bitmap is the widest at 3).
+//   - No test mnemonic; every zero/bound check via cmp reg, imm or
+//     cmp reg, reg.
+//   - Every cmp immediate <= 0x7FFFFFFF (max: 256).
+//   - No `and reg, imm64`, no 2-op imul, no neg.
+//   - font_glyph_bitmap is the only non-leaf here (it calls
+//     Font8x16::font_8x16_bitmap_ptr): 2-push prologue (rbx, r12) +
+//     `sub rsp, 8` pad keeps rsp%16 == 0 at the nested call site,
+//     matching rm_main's / RmRCap's documented shape.
+//   - Every `pub let` name here checked against Font8x16 / FontLayout
+//     / FontMetrics for global-symbol uniqueness (flat link namespace
+//     — see font_8x16.pdx's header for why this matters).
+//   - Reserved-label discipline: internal labels prefixed
+//     `font_api_` (disjoint from `font_8x16_` / `font_layout_` /
+//     `font_metrics_`).
+
+module FontApi = structure {
+
+  // Sentinel returned by font_lookup_glyph when the codepoint has no
+  // glyph in this library's single embedded 8x16 face. Matches the
+  // issue's literal spec ("0xFFFFFFFF if absent").
+  pub let FONT_API_GLYPH_ABSENT : u64 = 0xFFFFFFFF
+
+  // ==========================================================================
+  // font_lookup_glyph(codepoint) -> u64
+  // ==========================================================================
+  //
+  //   rdi (in)  = codepoint
+  //   rax (out) = glyph_id, or FONT_API_GLYPH_ABSENT (0xFFFFFFFF)
+  //
+  // 0.5.0 ships exactly one embedded face (Font8x16), indexed
+  // directly by codepoint — so the mapping is the identity function
+  // over [0, 256) and "absent" for everything else. This identity
+  // holds only as long as this library ships a single directly-
+  // indexed face; a future multi-face API would replace this body
+  // with a real table lookup without changing the signature.
+  // ==========================================================================
+  pub let font_lookup_glyph : (u64) -> u64 !{} @{} =
+    fn (codepoint: u64) -> unsafe {
+      effects: {}, capabilities: {},
+      justification: "libpdx-font R102.M1-002 (Closes libpdx-font#2): font_lookup_glyph. 0.5.0's single embedded face (Font8x16, 256 glyphs) is indexed directly by codepoint, so glyph_id == codepoint is the identity mapping over [0, 256); anything else returns FONT_API_GLYPH_ABSENT (0xFFFFFFFF), matching the issue's literal sentinel spec. Leaf: no memory touched, no capability, single cmp + two mov/ret arms. No test mnemonic (cmp rdi, 256 + jae). Immediate 256 well under 0x7FFFFFFF. Reserved-label prefix font_api_.",
+      block: {
+        cmp rdi, 256;
+        jae font_api_lookup_absent;
+        mov rax, rdi;
+        ret;
+      font_api_lookup_absent:
+        mov rax, 0xFFFFFFFF;
+        ret;
+      }
+    }
+
+  // ==========================================================================
+  // font_glyph_bitmap(glyph_id, out_ptr, out_max) -> u64
+  // ==========================================================================
+  //
+  //   rdi (in)  = glyph_id  — expected ∈ [0, 256)
+  //   rsi (in)  = out_ptr   — caller-owned buffer, >= 16 bytes on success
+  //   rdx (in)  = out_max   — bytes available at out_ptr
+  //   rax (out) = 16 (bytes written) on success;
+  //               -ENOENT (-2)  if glyph_id >= 256 (no such glyph)
+  //               -EINVAL (-22) if out_max < 16 (buffer too small)
+  //
+  // Copies Font8x16's 16-byte row table for `glyph_id` into
+  // `out_ptr`. Non-leaf: calls Font8x16::font_8x16_bitmap_ptr, so
+  // out_ptr/out_max are staged into callee-save rbx/r12 across that
+  // call (Font8x16's accessor declares rdi/rax as its only touched
+  // registers, but SysV treats rsi/rdx/rcx as caller-save regardless
+  // of what a given callee happens to clobber — staging into
+  // callee-save regs is the documented-safe pattern this repo's own
+  // pdxfs_txn.pdx / rm_main follow for the same reason).
+  //
+  // Register plan:
+  //   rbx = out_ptr    (callee-save, staged pre-call)
+  //   r12 = out_max    (callee-save, staged pre-call)
+  //   r9  = src ptr (Font8x16::font_8x16_bitmap_ptr's return)
+  //   r8  = byte-copy cursor
+  //   rax = byte-load scratch / return value
+  // ==========================================================================
+  pub let font_glyph_bitmap : (u64, u64, u64) -> u64 !{mem} @{} =
+    fn (glyph_id: u64) (out_ptr: u64) (out_max: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M1-002 (Closes libpdx-font#2): font_glyph_bitmap copies Font8x16's 16-byte glyph row table into a caller buffer. 2-push prologue (rbx=out_ptr, r12=out_max) + `sub rsp, 8` pad keeps rsp%16==0 at the `call font_8x16_bitmap_ptr` site (entry rsp%16==8; two pushes keep the residue at 8; the 8-byte pad brings it to 0 — same shape rm_main's prologue comment documents). Bound checks precede the call: cmp rdi, 256 / jae -> -ENOENT (glyph_id out of range, matches the issue's literal 256-glyph domain); cmp r12, 16 / jb -> -EINVAL (buffer too small for a 16-byte row table) — both checks run BEFORE the call so a bad caller never triggers Font8x16's own undefined-out-of-range read. On the success path, rdi (still glyph_id from the caller, untouched by either cmp) is passed straight through to font_8x16_bitmap_ptr; its return (rax = src ptr) is staged into r9 (caller-save, safe to reuse post-call) before the byte-copy loop. Byte copy uses the canonical xor rax,rax; mov_b rax,[src] / mov_b [dst], rax idiom (#1248 mitigation), 16 iterations bounded by an explicit cmp r8, 16 (no test mnemonic). Errno constants: -2 (ENOENT) and -22 (EINVAL) loaded as full 64-bit two's-complement immediates the same way cp's copy.pdx loads -36 (ENAMETOOLONG) — `mov rax, 0xFFFF...` — not via a NEG instruction. Reserved-label prefix font_api_glyphbmp_.",
+      block: {
+        push rbx;
+        push r12;
+        sub rsp, 8;                          // pad -> rsp%16==0 at the nested call
+
+        mov rbx, rsi;                        // rbx = out_ptr
+        mov r12, rdx;                        // r12 = out_max
+
+        cmp rdi, 256;
+        jae font_api_glyphbmp_noent;
+
+        cmp r12, 16;
+        jb font_api_glyphbmp_inval;
+
+        call font_8x16_bitmap_ptr;           // rdi = glyph_id (unchanged); rax = src ptr
+        mov r9, rax;
+
+        xor r8, r8;                          // i = 0
+      font_api_glyphbmp_copy:
+        cmp r8, 16;
+        jae font_api_glyphbmp_done;
+        xor rax, rax;
+        mov_b rax, [r9 + r8];
+        mov_b [rbx + r8], rax;
+        add r8, 1;
+        jmp font_api_glyphbmp_copy;
+
+      font_api_glyphbmp_done:
+        mov rax, 16;
+        jmp font_api_glyphbmp_ret;
+
+      font_api_glyphbmp_noent:
+        mov rax, 0xFFFFFFFFFFFFFFFE;         // -2 == -ENOENT
+        jmp font_api_glyphbmp_ret;
+
+      font_api_glyphbmp_inval:
+        mov rax, 0xFFFFFFFFFFFFFFEA;         // -22 == -EINVAL
+
+      font_api_glyphbmp_ret:
+        add rsp, 8;
+        pop r12;
+        pop rbx;
+        ret;
+      }
+    }
+
+  // ==========================================================================
+  // font_measure_text(text, len) -> u64
+  // ==========================================================================
+  //
+  //   rdi (in)  = text — byte buffer, not necessarily NUL-terminated
+  //   rsi (in)  = len  — number of bytes to scan
+  //   rax (out) = advance in px
+  //
+  // Single-line advance is len_of_widest_line * 8px. Multi-line input
+  // (embedded 0x0A bytes) is measured as the widest line rather than
+  // total bytes*8 — this is the useful quantity for a caller sizing a
+  // bounding box for FontLayout::font_layout_text's multi-line output,
+  // since that function also resets x and advances y on '\n'.
+  //
+  // Register plan (leaf; all caller-save):
+  //   rcx = i (loop cursor)
+  //   r8  = cur_width (current line's running px width)
+  //   r9  = max_width (widest line seen so far; the return value)
+  //   rax = byte-load scratch
+  // ==========================================================================
+  pub let font_measure_text : (u64, u64) -> u64 !{mem} @{} =
+    fn (text_ptr: u64) (len: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M1-002 (Closes libpdx-font#2): font_measure_text walks `len` bytes, tracking cur_width (r8, +8px per non-newline byte) and max_width (r9, the widest line seen, folded in whenever a 0x0A byte is hit or at end-of-input). Returns max_width rather than len*8 so the value is directly useful as a bounding-box width for multi-line input FontLayout::font_layout_text would also wrap on '\\n' — a caller measuring before laying out gets the same line-width semantics both functions agree on. Leaf: no nested calls, no memory writes (effects: {mem} declared for the byte-loop reads only). Byte load via xor rax,rax; mov_b rax,[rdi+rcx] (#1248 idiom) with rcx as a plain index (not a pointer walk) so text_ptr itself stays untouched for the whole scan. No test mnemonic (every branch is cmp rcx,rsi / cmp rax,10 / cmp r8,r9). No `and`, no 2-op imul, no neg. Reserved-label prefix font_api_measure_.",
+      block: {
+        xor rcx, rcx;                        // i = 0
+        xor r8, r8;                          // cur_width = 0
+        xor r9, r9;                          // max_width = 0
+
+      font_api_measure_loop:
+        cmp rcx, rsi;
+        jae font_api_measure_tail;
+
+        xor rax, rax;
+        mov_b rax, [rdi + rcx];
+        cmp rax, 10;                         // '\n' == 0x0A
+        jne font_api_measure_advance;
+
+        cmp r8, r9;
+        jbe font_api_measure_reset;
+        mov r9, r8;
+      font_api_measure_reset:
+        xor r8, r8;
+        jmp font_api_measure_next;
+
+      font_api_measure_advance:
+        add r8, 8;
+
+      font_api_measure_next:
+        add rcx, 1;
+        jmp font_api_measure_loop;
+
+      font_api_measure_tail:
+        cmp r8, r9;
+        jbe font_api_measure_done;
+        mov r9, r8;
+
+      font_api_measure_done:
+        mov rax, r9;
+        ret;
+      }
+    }
+}

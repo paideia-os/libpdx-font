@@ -1,0 +1,26 @@
+# libpdx-font .gitignore
+#
+# build-out/ is the compile-check product directory (tools/build.sh);
+# object/binary/archive artifacts must never enter version control.
+#
+# NOTE: unlike most sibling repos this one does NOT blanket-ignore
+# `*.bin` — assets/fonts/glyphs_8x16.bin is a vendored SOURCE asset
+# (the 8x16 glyph table Font8x16 embeds via @include_bytes), not a
+# build product. If a future edit adds a build-out/*.bin artifact,
+# scope its ignore to build-out/ specifically rather than reinstating
+# a repo-wide *.bin rule that would silently untrack the font asset.
+
+# Build products
+build-out/
+*.o
+*.elf
+*.a
+*.so
+*.so.*
+
+# Editor / OS noise
+*~
+.DS_Store
+
+# Local scratch
+.scratch/

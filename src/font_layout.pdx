@@ -1,0 +1,146 @@
+// src/font_layout.pdx — libpdx-font R102.M2-002 (Closes libpdx-font#4)
+//
+// Fixed-advance text layout: font_layout_text(text, len, x, y,
+// out_ops) emits one (x, y, glyph_id) u64 triplet per byte into
+// out_ops, advancing x by 8px per char. '\n' (0x0A) resets x to its
+// original starting value and advances y by 16px (no triplet emitted
+// for the newline byte itself).
+//
+// ==============================================================================
+// Encoder-arity adaptation (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//
+// The issue's literal signature is font_layout_text(text, len, x, y,
+// out_ops) — 5 curried args, one past this repo's 4-arg ceiling (see
+// cp's src/pdxfs_txn.pdx::pdxfs_txn_bind for the same discipline
+// documented in a sibling repo: "keeping every function... <= 4
+// curried args"). Rather than split into a bind-then-call pair (which
+// would force a stateful .bss handoff between two calls for what is
+// conceptually one operation), this function packs the two excess
+// u64s (x, y) into a single register: `xy0_packed` carries x in the
+// HIGH 32 bits and y in the LOW 32 bits. Unpacked with shr/shl+shr
+// (no `and reg, imm64`, per the pitfall list). A caller with x/y as
+// separate values computes the pack as `(x << 32) | y` on its own
+// side before calling.
+//
+// ==============================================================================
+// Output buffer contract
+// ==============================================================================
+//
+// The issue's literal signature carries no out_max / buffer-length
+// argument. Each emitted triplet is 3 u64s = 24 bytes
+// (x, y, glyph_id in that field order). Every input byte except a
+// 0x0A newline emits exactly one triplet, so `len * 24` bytes is
+// always a safe upper bound for out_ops's size — newlines only ever
+// REDUCE the number of triplets emitted relative to that bound. This
+// function does not bounds-check out_ops; sizing it correctly is the
+// caller's contract, exactly as documented here.
+//
+// glyph_id note: this function writes the raw codepoint BYTE value
+// (0..255, zero-extended to u64) as glyph_id directly, without
+// calling FontApi::font_lookup_glyph first. This is safe because
+// font_lookup_glyph's identity mapping (glyph_id == codepoint) is
+// total over the single-byte domain a byte-loop read produces (mov_b
+// always yields a value in [0, 256), which is always < FONT_8X16_
+// GLYPHS = 256, so font_lookup_glyph's "absent" arm can never fire
+// here). This equivalence holds ONLY as long as this library ships a
+// single directly-indexed embedded face; a future multi-face API
+// would need to route glyph resolution through font_lookup_glyph
+// explicitly rather than relying on this identity.
+//
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// -------------------------------------------------------
+//   - Module FontLayout (PascalCase basename matches src/font_layout.pdx).
+//   - 4 curried args exactly (see arity note above).
+//   - Leaf: no nested calls (glyph_id written directly, per the note
+//     above), so no push/pop parity needed; rsp%16==8 on entry holds
+//     throughout.
+//   - No test mnemonic; every branch via cmp reg, imm or cmp reg, reg.
+//   - No `and reg, imm64` (the x0/y0 unpack uses shr / shl+shr).
+//   - No 2-op imul (advances are +8 / +16 via `add`, not multiplies).
+//   - Every `pub let` name checked against Font8x16 / FontApi /
+//     FontMetrics for global-symbol uniqueness (flat link namespace).
+//   - Reserved-label discipline: internal labels prefixed
+//     `font_layout_` (disjoint from `font_api_` / `font_8x16_` /
+//     `font_metrics_`; `loop` itself is a reserved keyword, hence
+//     `font_layout_loop` rather than a bare `loop:`).
+
+module FontLayout = structure {
+
+  pub let FONT_LAYOUT_ADVANCE_X : u64 = 8
+  pub let FONT_LAYOUT_ADVANCE_Y : u64 = 16
+
+  // ==========================================================================
+  // font_layout_text(text, len, xy0_packed, out_ops) -> u64
+  // ==========================================================================
+  //
+  //   rdi (in)  = text        — byte buffer, not necessarily NUL-terminated
+  //   rsi (in)  = len         — number of bytes to lay out
+  //   rdx (in)  = xy0_packed  — starting (x0, y0): x0 in bits [63:32],
+  //                             y0 in bits [31:0]
+  //   rcx (in)  = out_ops     — caller-owned buffer, sized >= len*24
+  //                             bytes (see module header's buffer
+  //                             contract note)
+  //   rax (out) = op_count — number of (x,y,glyph_id) triplets
+  //                          written (excludes newline bytes)
+  //
+  // Register plan (leaf; all caller-save, no nested calls):
+  //   r11 = x0        (constant across the whole call — the reset
+  //                     target on every '\n')
+  //   r8  = cur_x     (mutable; starts at x0, +8 per glyph, resets to
+  //                     x0 on '\n')
+  //   r9  = cur_y     (mutable; starts at y0, +16 on '\n')
+  //   r10 = op_count  (return value)
+  //   rdx = i         (loop cursor; reused after the one-time unpack
+  //                     of xy0_packed, since that value is fully
+  //                     consumed into r8/r9/r11 before the loop starts)
+  //   rcx = out cursor (mutable; +24 per emitted triplet)
+  //   rax = byte-load scratch
+  // ==========================================================================
+  pub let font_layout_text : (u64, u64, u64, u64) -> u64 !{mem} @{} =
+    fn (text_ptr: u64) (len: u64) (xy0_packed: u64) (out_ops: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M2-002 (Closes libpdx-font#4): font_layout_text emits one (x,y,glyph_id) u64 triplet per non-newline byte, advancing cur_x (r8) by FONT_LAYOUT_ADVANCE_X (8) per char and, on 0x0A, resetting cur_x to the constant x0 (r11, unpacked once from xy0_packed's high 32 bits and never mutated again) and advancing cur_y (r9, unpacked from xy0_packed's low 32 bits) by FONT_LAYOUT_ADVANCE_Y (16). Unpack avoids `and reg,imm64`: x0 = xy0_packed >> 32 (shr clears the low bits by shifting them out); y0 = (xy0_packed << 32) >> 32 (shl then shr clears the high 32 bits, leaving the low 32 zero-extended) — same shr/shl align-up idiom libpdx-argv's emit_parse_error uses for its own imm64-avoidance. rdx (xy0_packed) is fully consumed by the unpack before the loop starts, so it is safely reused as the loop index i afterward — no register pressure beyond the documented plan. Each iteration reads text[i] via the canonical xor rax,rax; mov_b rax,[rdi+rdx] idiom (#1248); glyph_id is written as the raw byte value with no font_lookup_glyph call (see module header's equivalence note: mov_b always yields [0,256), which is always inside the identity-mapped domain, so no lookup is needed — and skipping it keeps this function a leaf, avoiding a push/pop-parity nested-call prologue for zero behavioral difference). Triplet write order is x (offset 0), y (offset 8), glyph_id (offset 16) at [rcx+N], then `add rcx, 24` advances the output cursor. No test mnemonic (every branch is cmp reg,reg or cmp reg,imm, both well under 0x7FFFFFFF — max immediate here is 24). No `and`, no 2-op imul, no neg. Reserved-label prefix font_layout_ throughout (loop itself is a reserved keyword, hence font_layout_loop not `loop:`).",
+      block: {
+        mov r11, rdx;
+        shr r11, 32;                         // r11 = x0 (constant)
+        mov r9, rdx;
+        shl r9, 32;
+        shr r9, 32;                          // r9 = y0 (mutable cur_y)
+        mov r8, r11;                         // r8 = cur_x, starts at x0
+
+        xor rdx, rdx;                        // i = 0 (xy0_packed fully consumed above)
+        xor r10, r10;                        // op_count = 0
+
+      font_layout_loop:
+        cmp rdx, rsi;
+        jae font_layout_done;
+
+        xor rax, rax;
+        mov_b rax, [rdi + rdx];
+
+        cmp rax, 10;                         // '\n' == 0x0A
+        je font_layout_newline;
+
+        mov [rcx + 0], r8;                   // triplet.x
+        mov [rcx + 8], r9;                   // triplet.y
+        mov [rcx + 16], rax;                 // triplet.glyph_id
+        add rcx, 24;
+        add r10, 1;
+        add r8, 8;                           // FONT_LAYOUT_ADVANCE_X
+        jmp font_layout_next;
+
+      font_layout_newline:
+        mov r8, r11;                         // reset cur_x to x0
+        add r9, 16;                          // FONT_LAYOUT_ADVANCE_Y
+
+      font_layout_next:
+        add rdx, 1;
+        jmp font_layout_loop;
+
+      font_layout_done:
+        mov rax, r10;
+        ret;
+      }
+    }
+}

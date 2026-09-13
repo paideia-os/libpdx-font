@@ -1,0 +1,186 @@
+// tests/font_equivalence_smoke.pdx — libpdx-font R102.M4-001
+// (Closes libpdx-font#7)
+//
+// FontEquivalenceSmoke::font_equivalence_smoke_run compares Font8x16's
+// 26 ASCII-letter glyphs ('A'..'Z', 0x41..0x5A) against the reference
+// bytes paideia-os's own `fb_font.pdx` currently holds for that same
+// range, returning the number of glyphs that differ (0 == every glyph
+// byte-identical).
+//
+// ==============================================================================
+// Why the reference is a placeholder row, not real letterforms
+// ==============================================================================
+//
+// The issue text asks to assert byte-identical glyphs "vs fb_font.pdx"
+// but explicitly allows comparing "against the placeholder if that's
+// still what fb_font holds". It is: paideia-os's
+// `assets/fonts/vga8x16.bin` was byte-inspected (paideia-os HEAD,
+// commit ae011e2, the same commit `src/font_8x16.pdx`'s own header
+// cites) and every glyph in the printable ASCII range 0x21..0x7E —
+// which fully covers 'A'..'Z' — is the IDENTICAL flat 16-byte
+// alternating-row stripe `0xAA, 0x55, 0xAA, 0x55, ...` (row 0 = 0xAA,
+// row 1 = 0x55, alternating; verified byte-for-byte across all 26
+// letters, not merely asserted from prose). `FES_FB_PLACEHOLDER_
+// EVEN_ROW` / `FES_FB_PLACEHOLDER_ODD_ROW` below encode that single
+// shared 16-byte pattern; no `@include_bytes` of a copied binary asset
+// is needed since every one of the 26 reference glyphs is the same 16
+// bytes.
+//
+// `Font8x16`'s own glyph store (`src/font_8x16.pdx`) is REAL, vendored
+// public-domain VGA font data (Lat15-VGA16.psf1), byte-inspected as
+// genuinely different from this placeholder pattern for every letter
+// checked during that file's own implementation (e.g. 'A' = 0x41 is
+// `00 00 10 38 6c c6 c6 fe c6 c6 c6 c6 00 00 00 00` in this repo's
+// real font, nothing like `aa 55 aa 55 ...`). Given that, running this
+// smoke TODAY is expected — not a bug — to report all 26 glyphs as
+// mismatched (`FES_EXPECTED_MISMATCH_AT_THIS_LANDING` = 26): this
+// repo ships real glyph pixels, `fb_font.pdx` still ships a
+// placeholder, and "byte-identical" is simply false between real data
+// and a placeholder by construction. This assertion becomes load-
+// bearing the moment paideia-os lands real glyph pixels in
+// `fb_font.pdx` (its own header: "R23.M2 replaces the asset with
+// actual... vgacon-8x16 glyph data") — at that point a re-run
+// returning nonzero is the signal to open a real cross-repo font-
+// parity divergence issue; returning 0 confirms the two repos agree.
+//
+// ==============================================================================
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//   - Module FontEquivalenceSmoke (PascalCase basename matches
+//     tests/font_equivalence_smoke.pdx).
+//   - Zero-argument function; within the <= 4 curried-args cap.
+//   - No test mnemonic; every branch via cmp reg, imm.
+//   - Every cmp immediate <= 0x7FFFFFFF (largest is 0x5A = 90).
+//   - `and rcx, 1` is the only `and` in this file — rcx, never
+//     r8-r15, so the `and reg, imm64` encoder gap does not apply.
+//   - No 2-op imul; no neg; no sil/dil/bl aliases (byte loads route
+//     through xor rax,rax; mov_b rax,[ptr] per #1248).
+//   - cp/mismatch_count are packed into one callee-save register
+//     (`rbx`, cp in the high 32 bits, mismatch_count in the low 32
+//     bits) rather than spending two callee-save slots — the same
+//     `xy0_packed` idiom `FontLayout::font_layout_text`
+//     (src/font_layout.pdx) already establishes in this repo, unpacked
+//     via shr / shl+shr, never `and reg, imm64`.
+//   - 1-push prologue (rbx) lands rsp%16==0 at the one nested call
+//     (`font_8x16_bitmap_ptr`) — entry rsp%16==8, 1 push (8 bytes).
+//   - Reserved-label discipline: every branch label below is prefixed
+//     `fes_` (disjoint from `font_api_` / `font_8x16_` /
+//     `font_layout_` / `font_metrics_` / `loop`/`if`).
+//   - Every `pub let` name here checked against Font8x16 / FontApi /
+//     FontLayout / FontMetrics / FontSchema for global-symbol
+//     uniqueness (flat link namespace).
+
+module FontEquivalenceSmoke = structure {
+
+  pub let FES_LETTER_FIRST : u64 = 0x41   // 'A'
+  pub let FES_LETTER_LAST  : u64 = 0x5A   // 'Z'
+  pub let FES_LETTER_COUNT : u64 = 26
+
+  // fb_font.pdx's current placeholder row (see file header): every
+  // even row is 0xAA, every odd row is 0x55, for all 16 rows of every
+  // glyph in 0x21..0x7E.
+  pub let FES_FB_PLACEHOLDER_EVEN_ROW : u64 = 0xAA
+  pub let FES_FB_PLACEHOLDER_ODD_ROW  : u64 = 0x55
+
+  // Documented expectation at THIS landing (see file header) — not
+  // consumed by the function below, kept so a future re-run's return
+  // value has an obvious "did anything change" baseline to diff
+  // against without re-deriving it from prose.
+  pub let FES_EXPECTED_MISMATCH_AT_THIS_LANDING : u64 = 26
+
+  // ============================================================================
+  // font_equivalence_smoke_run() -> u64
+  //
+  //   rax (out) = mismatch_count — number of the 26 letters ('A'..'Z')
+  //         whose Font8x16 glyph bytes differ from fb_font.pdx's
+  //         current placeholder row in at least one of the 16 rows.
+  //         0 == every glyph byte-identical to the reference.
+  //
+  // Register plan: 1-push prologue (rbx = packed state: cp in bits
+  // [63:32], mismatch_count in bits [31:0], same pack/unpack idiom
+  // FontLayout::font_layout_text already establishes in this repo).
+  // Entry rsp%16==8, 1 push (8 bytes) lands rsp%16==0 for the one
+  // nested call (font_8x16_bitmap_ptr) per outer-loop iteration.
+  // ============================================================================
+  pub let font_equivalence_smoke_run : () -> u64 !{mem} @{} =
+    fn () -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M4-001 (Closes libpdx-font#7): font_equivalence_smoke_run. 1-push prologue (rbx, packed state) lands rsp%16==0 (entry 8, 1 push=8 bytes) for the nested call to font_8x16_bitmap_ptr each outer-loop iteration. rbx packs cp (high 32 bits) and mismatch_count (low 32 bits), initialised to (0x41 << 32) | 0 -- unpacked/repacked via shr/shl+shr around every mutation, never `and reg,imm64` (the one `and rcx,1` below runs on rcx, not r8-r15). Outer loop (fes_run_loop): unpack cp into rax via shr rax,32; cmp rax,0x5A; jg fes_run_done (loop bound is FES_LETTER_LAST inclusive, so `jg`, not `jge`). Per glyph: rdi=cp; call font_8x16_bitmap_ptr (src/font_8x16.pdx) -> rax=glyph row-table ptr, staged into r9 (caller-save, safe since no further call happens before this glyph's inner loop finishes). Inner loop (fes_row_loop, r8=row 0..16): loads the real byte via xor rax,rax; mov_b rax,[r9+r8] (#1248); computes the expected placeholder byte via `mov rcx,r8; and rcx,1` (row parity) then a two-way branch to FES_FB_PLACEHOLDER_EVEN_ROW (0xAA) or _ODD_ROW (0x55) into rdx; cmp rax,rdx; je fes_row_next (byte matches, keep scanning this glyph's remaining rows). On any single mismatched row (fes_row_cmp falls through to the bump path): mismatch_count is incremented exactly once for this glyph (unpack low32 via shl32+shr32, add 1, repack with cp's high32 preserved via a fresh shr32+shl32 read of the OLD rbx before it is overwritten) and control jumps straight to fes_next_glyph, skipping any remaining rows of this glyph (one mismatch is sufficient to count the glyph as non-equivalent; further per-row detail is not this function's job). fes_row_done (all 16 rows matched): falls through to fes_next_glyph with mismatch_count unchanged. fes_next_glyph: cp incremented (unpack high32, add 1, repack with mismatch_count's low32 preserved), jmp fes_run_loop. fes_run_done: rax = mismatch_count (unpack rbx's low32 via shl32+shr32); pop rbx; ret. No test mnemonic (cmp reg,imm / cmp reg,reg throughout; largest immediate 0x5A=90, well within imm32). No `and` on r8-r15 (the one `and` runs on rcx). No 2-op imul, no neg, no sil/dil/bl. Reserved-label prefix fes_ throughout.",
+      block: {
+        push rbx;
+
+        mov rbx, 0x41;                       // FES_LETTER_FIRST
+        shl rbx, 32;                         // state = (cp << 32) | 0 (mismatch_count = 0)
+
+      fes_run_loop:
+        mov rax, rbx;
+        shr rax, 32;                         // rax = cp
+        cmp rax, 0x5A;                       // FES_LETTER_LAST
+        jg fes_run_done;
+
+        mov rdi, rax;                        // arg for font_8x16_bitmap_ptr
+        call font_8x16_bitmap_ptr;           // rax = glyph row-table ptr
+        mov r9, rax;                         // r9 = ptr (caller-save; safe pre-inner-loop)
+
+        xor r8, r8;                          // row = 0
+      fes_row_loop:
+        cmp r8, 16;
+        jge fes_row_done;
+
+        xor rax, rax;
+        mov_b rax, [r9 + r8];                // actual byte from Font8x16's store
+
+        mov rcx, r8;
+        and rcx, 1;                          // row parity (rcx, not r8-r15)
+        cmp rcx, 0;
+        je fes_row_even;
+        mov rdx, 0x55;                       // FES_FB_PLACEHOLDER_ODD_ROW
+        jmp fes_row_cmp;
+      fes_row_even:
+        mov rdx, 0xAA;                       // FES_FB_PLACEHOLDER_EVEN_ROW
+
+      fes_row_cmp:
+        cmp rax, rdx;
+        je fes_row_next;
+
+        // Mismatch: bump mismatch_count once for this glyph, skip
+        // remaining rows.
+        mov rax, rbx;
+        shl rax, 32;
+        shr rax, 32;                         // rax = mismatch_count (low32)
+        add rax, 1;
+        mov rcx, rbx;
+        shr rcx, 32;
+        shl rcx, 32;                         // rcx = cp << 32 (high32 preserved)
+        add rcx, rax;
+        mov rbx, rcx;
+        jmp fes_next_glyph;
+
+      fes_row_next:
+        add r8, 1;
+        jmp fes_row_loop;
+
+      fes_row_done:
+        // All 16 rows matched -- no mismatch bump.
+
+      fes_next_glyph:
+        mov rax, rbx;
+        shr rax, 32;
+        add rax, 1;                          // cp += 1
+        shl rax, 32;
+        mov rcx, rbx;
+        shl rcx, 32;
+        shr rcx, 32;                         // rcx = mismatch_count (preserved)
+        add rax, rcx;
+        mov rbx, rax;
+        jmp fes_run_loop;
+
+      fes_run_done:
+        mov rax, rbx;
+        shl rax, 32;
+        shr rax, 32;                         // rax = mismatch_count (return value)
+        pop rbx;
+        ret;
+      }
+    }
+}

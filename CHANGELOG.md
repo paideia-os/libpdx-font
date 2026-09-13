@@ -5,6 +5,53 @@ in the paideia-os repo). The 0.5.0 line closes Milestones M1 and M2 of the
 five-milestone plan in this repo's README; every subsequent entry adds one
 line to the top under the same shape.
 
+## 0.6.0 — 2026-09-13
+
+Wave CC follow-up: M3 schema-registry integration (WEAK stub) + first
+M4 smoke, closing libpdx-font#6 and #7.
+
+### Landed
+
+- **libpdx-font#6 (R102.M3-001) — schema-registry integration (WEAK
+  stub).** `src/font_schema.pdx` (`Module FontSchema`) adds
+  `font_schema_init() -> u64`, intended to register the
+  `FontMetricsRecord@0.1` schema DDL with a real schema-registry client
+  and store the returned handle in module-level
+  `font_metrics_schema_id`. `deps.list` holds no linkable
+  `libpdx-schema-registry` dependency at this landing, so the body is a
+  WEAK stub returning a fixed, deterministic handle
+  (`FS_SCHEMA_ID_STUB` = 1) rather than fabricating a real registration
+  round-trip — same "declared dependency, unprovisioned resource"
+  posture `pdxping`'s own `src/elevate_gate.pdx` / `src/audit_wire.pdx`
+  document for the identical kind of gap. **Naming note**: this file
+  registers under `FontMetricsRecord@0.1` (the name this issue and this
+  repo's own README use); the M2-003 wire-shape module
+  (`src/font_metrics.pdx`) names the identical 128-byte layout
+  `MetricsRecord@0.1` internally — flagged in `font_schema.pdx`'s own
+  header for a future cleanup pass to reconcile the two names, not
+  fixed in this commit (out of scope).
+- **libpdx-font#7 (R102.M4-001) — glyph equivalence smoke.**
+  `tests/font_equivalence_smoke.pdx` (`Module FontEquivalenceSmoke`)
+  adds `font_equivalence_smoke_run() -> u64`, comparing `Font8x16`'s 26
+  ASCII-letter glyphs (`'A'..'Z'`, 0x41..0x5A) against the reference
+  bytes paideia-os's `fb_font.pdx` currently holds for that range,
+  returning the number of glyphs that differ (0 = byte-identical).
+  **Byte-inspected at paideia-os HEAD (commit ae011e2)**: every glyph
+  in `fb_font.pdx`'s printable-ASCII placeholder range is the identical
+  flat 16-byte `0xAA`/`0x55` alternating-row stripe — confirmed for all
+  26 letters, not merely asserted from prose — so the reference is
+  encoded as that one 16-byte pattern rather than a copied binary
+  asset. Because this library ships REAL vendored glyph pixels
+  (`src/font_8x16.pdx`'s own Lat15-VGA16 provenance) while
+  `fb_font.pdx` still ships a placeholder, running this smoke TODAY is
+  *expected* to report all 26 glyphs mismatched
+  (`FES_EXPECTED_MISMATCH_AT_THIS_LANDING` = 26) — not a bug. This
+  assertion becomes load-bearing the moment paideia-os lands real
+  glyph pixels in `fb_font.pdx` (its own header: "R23.M2 replaces the
+  asset with actual... vgacon-8x16 glyph data"): a re-run returning 0
+  at that point confirms kernel/user glyph parity; a nonzero return is
+  the signal to open a real cross-repo divergence issue.
+
 ## 0.5.0 — 2026-09-13
 
 Wave CC: single implementation pass landing the M1 scaffold + M1 API

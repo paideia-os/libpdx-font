@@ -3,13 +3,18 @@
 # Wave:  R102, Wave CC
 # Doc:   design/graphics/r102-user-plan.md §2.1 in paideia-os.
 #
-# libpdx-font 0.5.0 has NO library dependencies. It is pure userspace:
+# libpdx-font 0.6.0 has NO library dependencies. It is pure userspace:
 # FontApi/Font8x16/FontLayout read only caller-supplied buffers and
 # this library's own embedded .rodata glyph table; FontMetrics issues
 # one raw sys_write of its own (fd 2) rather than routing through
-# libpdx-semantic-pipe or libpdx-audit — promoting MetricsRecord@0.1
-# to a real declared schema over one of those libraries is M3 work
-# (see caps.decl's declares_output_schemas note).
+# libpdx-semantic-pipe or libpdx-audit; FontSchema::font_schema_init
+# (M3-001, #6) is a WEAK stub returning a deterministic handle rather
+# than a real schema-registry round-trip — there is no linkable
+# `libpdx-schema-registry` (or equivalent) client to call yet. Wiring
+# either real dependency (schema registry for FontSchema, semantic-pipe
+# for a future real FontMetrics emit path) is M3 follow-up work (see
+# caps.decl's declares_output_schemas note and src/font_schema.pdx's
+# own header for the full writeup).
 #
 # Format (mirrors design/tooling/plan.md §6.4 `deps.list` shape):
 #   <name>  <semver-lo>..<semver-hi>  <link-kind>

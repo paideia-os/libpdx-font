@@ -1,0 +1,114 @@
+// src/font_schema.pdx — libpdx-font R102.M3-001 (Closes libpdx-font#6)
+//
+// FontSchema::font_schema_init registers the `FontMetricsRecord@0.1`
+// schema DDL with the schema registry and holds the returned handle in
+// a module-level `font_metrics_schema_id`.
+//
+// ==============================================================================
+// Naming note — `FontMetricsRecord@0.1` vs. `MetricsRecord@0.1`
+// ==============================================================================
+//
+// This repo's README (top-level description) and this issue's own
+// text both name the emitted schema `FontMetricsRecord@0.1`. The
+// wire-shape module landed at M2-003 (`src/font_metrics.pdx`,
+// libpdx-font#5), however, names the identical 128-byte layout
+// `MetricsRecord@0.1` throughout its own header and function
+// justification. This file registers under the name this issue and
+// the README use — `FontMetricsRecord@0.1` — since that is the name a
+// schema-registry consumer would look this library up by. The
+// pre-existing `MetricsRecord@0.1` name inside `font_metrics.pdx`
+// itself is NOT renamed here (out of scope for this issue, and a
+// rename risks a wider diff than this landing's own scope); flagged
+// here for a future cleanup pass to reconcile the two names onto one.
+//
+// ==============================================================================
+// Why this is a WEAK stub, and why that is the CORRECT answer today
+// ==============================================================================
+//
+// `deps.list` documents libpdx-font 0.5.0/0.6.0 as having NO library
+// dependencies — there is no linkable `libpdx-schema-registry` client
+// this file could call a real `schema_register(name_ptr, name_len,
+// ddl_ptr, ddl_len) -> schema_id`-shaped function against. Rather than
+// fabricate a plausible-looking real registration call against a
+// dependency this repo does not link (the same "declared cap/
+// dependency, unprovisioned resource" trap `pdxping`'s own
+// `src/elevate_gate.pdx` and `src/audit_wire.pdx` document avoiding),
+// `font_schema_init` below is a WEAK stub: it returns a fixed,
+// deterministic handle (`FS_SCHEMA_ID_STUB` = 1, "the first schema a
+// real registry would hand back to the first caller") and stores it in
+// `font_metrics_schema_id` without ever calling out to anything. The
+// intended real body — construct the DDL string below, call the real
+// registry's `schema_register`, store its returned `schema_id` — is a
+// body-only swap once `libpdx-schema-registry` (or equivalent) is
+// added to `deps.list` and this repo's build is extended to link it;
+// `font_schema_init`'s own signature does not change.
+//
+// ==============================================================================
+// Intended real DDL (documentation only — never sent anywhere by the
+// stub body below)
+// ==============================================================================
+//
+// FS_DDL_FONT_METRICS mirrors FontMetrics::MetricsRecord@0.1's real,
+// landed 128-byte wire layout (src/font_metrics.pdx) field-for-field,
+// under the FontMetricsRecord@0.1 name this file registers:
+//
+//   FontMetricsRecord@0.1 { version:u32, op:u32, glyph_count:u64,
+//   bytes_rendered:u64, viewport_w:u64, viewport_h:u64,
+//   reserved:[u64;11] }
+//
+// ==============================================================================
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//   - Module FontSchema (PascalCase basename matches src/font_schema.pdx).
+//   - Zero-argument function; trivially within the <= 4 curried-args cap.
+//   - No test mnemonic; no cmp at all in the WEAK-stub body.
+//   - Leaf; no push/pop.
+//   - Every `pub let` name here checked against Font8x16 / FontApi /
+//     FontLayout / FontMetrics for global-symbol uniqueness (flat link
+//     namespace — see font_8x16.pdx's header for why this matters).
+
+module FontSchema = structure {
+
+  // --- Schema identity (documentation-only strings; never sent
+  //     anywhere by the WEAK-stub body below). ----------------------
+  pub let FS_SCHEMA_NAME : [u8; 22] = "FontMetricsRecord@0.1\0"
+  pub let FS_SCHEMA_NAME_LEN : u64 = 21
+
+  pub let FS_DDL_FONT_METRICS : [u8; 134] =
+    "FontMetricsRecord@0.1 { version:u32, op:u32, glyph_count:u64, bytes_rendered:u64, viewport_w:u64, viewport_h:u64, reserved:[u64;11] }\0"
+  pub let FS_DDL_FONT_METRICS_LEN : u64 = 133
+
+  // Deterministic WEAK-stub handle — "the first schema a real registry
+  // would hand back to the first caller". Not derived from anything;
+  // a real registration would replace this constant's use entirely
+  // with the registry's own returned schema_id.
+  pub let FS_SCHEMA_ID_STUB : u64 = 1
+
+  // --- .bss: the schema handle FontMetrics's own emit path would
+  //     consult once wired to a real, registered schema frame instead
+  //     of a raw fd-2 diagnostic byte blob (see font_metrics.pdx's own
+  //     I/O-posture note). Not read by any function in this repo yet
+  //     — no consumer wiring lands with this issue. ---------------------
+  pub let mut font_metrics_schema_id : u64 = uninit @align(8)
+
+  // ============================================================================
+  // font_schema_init() -> u64
+  //
+  //   rax (out) = FS_SCHEMA_ID_STUB (1) -- the STUB's deterministic
+  //         handle, also stored into font_metrics_schema_id.
+  //
+  // WEAK stub — see file header for the full "no linkable schema-
+  // registry dependency" writeup. Leaf: no push/pop.
+  // ============================================================================
+  pub let font_schema_init : () -> u64 !{mem} @{} =
+    fn () -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M3-001 (Closes libpdx-font#6): font_schema_init. WEAK stub -- see file header for the full writeup (deps.list holds no linkable libpdx-schema-registry client, so a real schema_register(name_ptr, name_len, ddl_ptr, ddl_len) call against FS_SCHEMA_NAME/FS_DDL_FONT_METRICS cannot be honestly constructed at this landing). Body: mov rax, 1 (FS_SCHEMA_ID_STUB); lea r8, [rip + font_metrics_schema_id]; mov [r8], rax stores the deterministic handle into the module-level .bss slot; rax already holds the same value as the return. effects: {mem} declared for the one store to font_metrics_schema_id; capabilities: {} since no syscall or real registry round-trip happens (the wider declaration a real body would need -- likely mem for staging the DDL string plus whatever capability class gates a real schema-registry client call -- is intentionally left undeclared here rather than guessed, mirroring pdxping's own icmp_wire.pdx posture for the identical kind of honest under-declaration). Zero-argument function; leaf; no push/pop. No test mnemonic (no branch in this body at all). Labels: none (straight-line body).",
+      block: {
+        mov rax, 1;                          // FS_SCHEMA_ID_STUB
+        lea r8, [rip + font_metrics_schema_id];
+        mov [r8], rax;
+        ret;
+      }
+    }
+}

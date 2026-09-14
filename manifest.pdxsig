@@ -1,4 +1,4 @@
-# manifest.pdxsig — libpdx-font 1.0.0-src
+# manifest.pdxsig — libpdx-font 1.0.1-src
 #
 # Unsigned source-form placeholder. Dual-signed manifest per
 # design/tooling/plan.md §D4 + §6.2 (identical policy to D1.a for
@@ -8,16 +8,26 @@
 # changelog, build_hash} tuple land at `paideia-as release --sign`
 # time; this repo has not been through that signing pass yet.
 #
-# 1.0.0-src (this commit, R102.M5-002 / libpdx-font#11) closes M5 of
-# the five-milestone plan — the last unsigned source-form milestone.
-# The `-src` git tag suffix (v1.0.0-src, not v1.0.0) marks that this
-# is the source tree a real 1.0.0 release will be cut from once
-# `paideia-as release --sign` populates Record 1 (author) and the
-# signing bot (T-INFRA-002) populates Record 2 (paideia-root) below —
-# same walk-back posture this wave's design/rescue-plan.md (paideia-
-# os/doc repo) documents for the org's marker-vs-signed-release gap.
-# Until both records are populated, `pkg install` refuses this
-# package unless `--from-source` (D4 fallback) is passed.
+# 1.0.0-src (R102.M5-002 / libpdx-font#11) closed M5 of the
+# five-milestone plan. 1.0.1-src (Wave EEE, this commit) is a
+# follow-up test-only patch landing libpdx-font#8 (R102.M4-002) and
+# #9 (R102.M4-003) — two M4 smoke-test issues that were still open
+# when the M5 close above landed concurrently in a parallel wave (out
+# of milestone-number order, but not out of validity: #8/#9 do not
+# touch any src/*.pdx file M5 depends on). No src/ change and no
+# behavior change; `tests/` only. `sources:` below is empty at this
+# repo's manifest schema (this file has no source-listing section —
+# see the payload-tuple `covers` line above), so nothing else in this
+# manifest changes shape for a tests-only landing beyond the version
+# number itself. The `-src` git tag suffix (v1.0.1-src, not v1.0.1)
+# marks that this is still unsigned source form: `paideia-as release
+# --sign` populating Record 1 (author) and the signing bot
+# (T-INFRA-002) populating Record 2 (paideia-root) below remain
+# pending, same walk-back posture this wave's design/rescue-plan.md
+# (paideia-os/doc repo) documents for the org's marker-vs-signed-
+# release gap. Until both records are populated, `pkg install`
+# refuses this package unless `--from-source` (D4 fallback) is
+# passed.
 #
 # Layout: two ML-DSA-65 signatures (3309 bytes each per NIST FIPS 204)
 # packed as a 16-byte record header + two length-prefixed sig blobs +

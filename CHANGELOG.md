@@ -5,6 +5,41 @@ in the paideia-os repo). The 0.5.0 line closes Milestones M1 and M2 of the
 five-milestone plan in this repo's README; every subsequent entry adds one
 line to the top under the same shape.
 
+## 1.0.1-src — 2026-09-13
+
+Wave EEE: M4 test-cohort follow-up, closing libpdx-font#8 and #9 —
+two smoke tests that were still open when Wave FFF's M5 close (below)
+landed concurrently. Test-only; no `src/*.pdx` change.
+
+### Landed
+
+- **libpdx-font#8 (R102.M4-002) — UTF-8 fallback smoke.**
+  `tests/font_utf8_fallback_smoke.pdx` (`Module
+  FontUtf8FallbackSmoke`) decodes the 4-byte UTF-8 sequence for
+  U+1F600 (GRINNING FACE, `F0 9F 98 80`) and asserts
+  `FontApi::font_lookup_glyph` returns the documented
+  `FONT_API_GLYPH_ABSENT` (0xFFFFFFFF) fallback sentinel for that
+  out-of-range codepoint — the real fallback surface this library
+  ships, since `font_measure_text` (the function the issue names) is
+  a pure byte-counting pixel-advance calculator with no glyph concept
+  at all. Also pins the real `>= 256` fallback boundary (a raw byte
+  in 0x80..0xFF is a valid in-range codepage glyph, NOT a fallback
+  case — the issue's `> 0x7F` framing does not match this library's
+  actual flat-256-glyph-codepage model), confirms `font_measure_text`
+  still returns a sane, deterministic width (32px = 4 bytes x 8px) on
+  the raw UTF-8 bytes, and confirms the fallback sentinel round-trips
+  safely (`-ENOENT`, never garbage) through `font_glyph_bitmap`. Full
+  reconciliation of the issue text against the real API lives in the
+  file's own header.
+- **libpdx-font#9 (R102.M4-003) — layout correctness smoke.**
+  `tests/font_layout_smoke.pdx` (`Module FontLayoutSmoke`) lays out
+  `"Hello\nWorld"` via `FontLayout::font_layout_text` and asserts
+  `'H'` at `(0,0)`, `'e'` at `(8,0)`, and `'W'` at `(0,16)` — the
+  first post-newline glyph, confirming the newline reset (x back to
+  x0) and line-advance (y += 16) both fire correctly — plus the
+  overall `op_count` (10, since the embedded newline consumes an
+  input byte without emitting a triplet).
+
 ## 1.0.0-src — 2026-09-13
 
 Wave FFF: M5 close, landing the second face + the unsigned 1.0.0

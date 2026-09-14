@@ -1,0 +1,204 @@
+// tests/font_utf8_fallback_smoke.pdx — libpdx-font R102.M4-002
+// (Closes libpdx-font#8)
+//
+// FontUtf8FallbackSmoke::font_utf8_fallback_smoke_run feeds a 4-byte
+// UTF-8 sequence for U+1F600 (GRINNING FACE, one of the most common
+// "emoji" test codepoints) through this library's actual codepoint-
+// to-glyph pipeline and asserts the out-of-range fallback behaves
+// safely and deterministically — never garbage, never a crash.
+//
+// ==============================================================================
+// Reconciling the issue text against this library's REAL API surface
+// ==============================================================================
+//
+// The issue asks to "feed a 4-byte UTF-8 emoji sequence into
+// font_measure_text; assert renderer emits the fallback glyph (0xFF
+// or box) for codepoints > 0x7F". Read literally against the code
+// that actually exists in this repo, two of that sentence's
+// assumptions do not hold, and this file is explicit about both
+// rather than silently reinterpreting the issue or asserting
+// something false against real code:
+//
+//   1. `FontApi::font_measure_text` (src/font_api.pdx) is a pure
+//      byte-counting pixel-advance calculator — `len` bytes in,
+//      widest-line-width-in-px out. It does not decode UTF-8, does
+//      not look up glyphs, and does not "emit" anything at all; there
+//      is no renderer call site inside it. The ONLY function in this
+//      library with fallback-glyph semantics is
+//      `FontApi::font_lookup_glyph(codepoint) -> glyph_id`, which
+//      returns `FontApi::FONT_API_GLYPH_ABSENT` (0xFFFFFFFF — an
+//      all-Fs sentinel, matching the issue's own "0xFF" framing) for
+//      any codepoint outside this library's single embedded 256-glyph
+//      8x16 codepage face.
+//   2. The library has no Unicode/UTF-8 awareness anywhere (Font8x16
+//      is a flat 256-entry byte-indexed codepage face, not a Unicode
+//      table) — `font_lookup_glyph`'s actual fallback boundary is
+//      `codepoint >= 256`, not `codepoint > 0x7F`. A raw byte in
+//      0x80..0xFF (Latin-1-supplement range, e.g. a UTF-8 continuation
+//      byte in isolation) is a perfectly valid in-range glyph_id under
+//      this codepage model, NOT a fallback case — CHECK 2 below pins
+//      that exact boundary as a deliberate regression guard so a
+//      future reader does not "fix" font_lookup_glyph to match the
+//      issue text's `> 0x7F` framing by accident.
+//
+// This file therefore tests BOTH real surfaces together, which is
+// what actually answers "does feeding this library UTF-8 emoji bytes
+// produce garbage": (CHECK 1) decode the 4-byte UTF-8 sequence into
+// its real Unicode codepoint (this file's own decoder — the library
+// has none) and confirm `font_lookup_glyph` returns the documented
+// `FONT_API_GLYPH_ABSENT` fallback sentinel, never an in-range value
+// and never garbage; (CHECK 2) pin the real >= 256 boundary; (CHECK 3)
+// confirm `font_measure_text` on the raw 4 UTF-8 bytes still returns
+// the sane, fully-deterministic byte-counted width (4 * 8px = 32),
+// proving the "not garbage" half of the issue's assertion for the
+// function it actually names; (CHECK 4) confirm the fallback sentinel
+// is itself safe to round-trip into `font_glyph_bitmap` (the next
+// stage of the real rendering pipeline) — it fails cleanly with
+// -ENOENT rather than reading past Font8x16's 256-glyph table.
+//
+// ==============================================================================
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//   - Module FontUtf8FallbackSmoke (PascalCase basename matches
+//     tests/font_utf8_fallback_smoke.pdx).
+//   - Zero-argument function; within the <= 4 curried-args cap.
+//   - No test mnemonic; every branch via cmp reg, imm or cmp reg, reg.
+//   - Every `cmp reg, imm` immediate is small and positive (0x07, 0x3F,
+//     0x80, 32) — well under 0x7FFFFFFF. The two all-Fs sentinel
+//     comparisons (FONT_API_GLYPH_ABSENT = 0xFFFFFFFF, -ENOENT =
+//     0xFFFFFFFFFFFFFFFE) are NEVER passed as a `cmp` immediate — x86
+//     `cmp r64, imm32` sign-extends its immediate, so an imm32 literal
+//     of 0xFFFFFFFF would compare against the sign-extended
+//     0xFFFFFFFFFFFFFFFF instead of the intended zero-extended
+//     0x00000000FFFFFFFF; both sentinels are instead `mov`-loaded
+//     into a scratch register (the same literal spelling
+//     `src/font_api.pdx` itself already uses for these exact two
+//     constants) and compared register-to-register, sidestepping the
+//     ambiguity entirely.
+//   - `and rax, 0x07` / `and rax, 0x3F` (the UTF-8 continuation-byte
+//     mask and the leading-byte low-3-bits mask) both run on rax, not
+//     r8-r15 — the `and reg, imm64` encoder gap does not apply.
+//   - No 2-op imul; no neg; no sil/dil/bl aliases (byte loads route
+//     through xor rax,rax; mov_b rax,[ptr] per #1248).
+//   - 1-push prologue (rbx = running fail-bitmask, callee-save) lands
+//     rsp%16==0 (entry rsp%16==8, 1 push=8 bytes) for the three
+//     zero-stack-adjustment nested calls (font_lookup_glyph x2,
+//     font_measure_text); the fourth call (font_glyph_bitmap) brackets
+//     a `sub rsp,16` / `add rsp,16` 16-byte scratch buffer around
+//     itself — 16 is itself a multiple of 16, so rsp%16==0 is
+//     preserved across that call too, no extra padding needed.
+//   - Fail-bitmask bits (1/2/4/8) are pairwise disjoint, so `add rbx,
+//     N` accumulates safely without depending on an `or` encoding.
+//   - Reserved-label discipline: every branch label below is prefixed
+//     `fufs_` (disjoint from `font_api_` / `font_8x16_` /
+//     `font_layout_` / `font_metrics_` / `font_schema_` / `fes_` /
+//     `loop`/`if`).
+//   - Every `pub let` name here checked against Font8x16 / FontApi /
+//     FontLayout / FontMetrics / FontSchema / FontEquivalenceSmoke for
+//     global-symbol uniqueness (flat link namespace).
+
+module FontUtf8FallbackSmoke = structure {
+
+  // U+1F600 GRINNING FACE, UTF-8-encoded (F0 9F 98 80). Decodes to
+  // 0x1F600 = 128512 via the standard 4-byte UTF-8 formula
+  // ((b0&0x07)<<18)|((b1&0x3F)<<12)|((b2&0x3F)<<6)|(b3&0x3F).
+  pub let fufs_utf8_bytes : [u8; 4] = [0xF0, 0x9F, 0x98, 0x80]
+
+  pub let FUFS_FAIL_ABSENT_CHECK   : u64 = 1   // bit 0: CHECK 1
+  pub let FUFS_FAIL_BOUNDARY_CHECK : u64 = 2   // bit 1: CHECK 2
+  pub let FUFS_FAIL_MEASURE_CHECK  : u64 = 4   // bit 2: CHECK 3
+  pub let FUFS_FAIL_BITMAP_CHECK   : u64 = 8   // bit 3: CHECK 4
+
+  // ============================================================================
+  // font_utf8_fallback_smoke_run() -> u64
+  //
+  //   rax (out) = fail-bitmask (OR of FUFS_FAIL_* bits above); 0 ==
+  //         every check passed.
+  //
+  // Register plan: 1-push prologue (rbx = fail-bitmask, callee-save).
+  // Entry rsp%16==8, 1 push (8 bytes) lands rsp%16==0 for the three
+  // plain nested calls; the fourth call's `sub rsp,16` / `add rsp,16`
+  // bracket preserves that same residue (see file header).
+  // ============================================================================
+  pub let font_utf8_fallback_smoke_run : () -> u64 !{mem} @{} =
+    fn () -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M4-002 (Closes libpdx-font#8): font_utf8_fallback_smoke_run. 1-push prologue (rbx=fail-bitmask, init 0) lands rsp%16==0 (entry 8, 1 push=8 bytes). DECODE: r10=lea(fufs_utf8_bytes); four independent byte loads via xor rax,rax; mov_b rax,[r10+k] (#1248 idiom), each masked (`and rax,0x07` for b0, `and rax,0x3F` for b1/b2/b3 — all on rax, never r8-r15) and shifted by a compile-time-immediate count (18/12/6/0, no `cl` staging needed) into r11, accumulating the real Unicode codepoint (expect 0x1F600) via plain `add r11,rax` after each shift. CHECK 1 (fufs_absent_ok): rdi=r11 (decoded cp); call font_lookup_glyph -> rax; r8=mov 0xFFFFFFFF (FONT_API_GLYPH_ABSENT, the exact literal spelling src/font_api.pdx itself uses for this constant — zero-extends correctly via `mov`, unlike a `cmp` imm32 which would sign-extend); `cmp rax,r8; je fufs_absent_ok` else `add rbx,1`. CHECK 2 (fufs_boundary_ok): rdi=0x80 (a valid in-range byte value under this library's flat codepage model — see file header's real->=256 boundary note); call font_lookup_glyph -> rax; `cmp rax,0x80; je fufs_boundary_ok` (small positive imm32, no sign-extension hazard) else `add rbx,2`. CHECK 3 (fufs_measure_ok): rdi=lea(fufs_utf8_bytes), rsi=4; call font_measure_text -> rax; `cmp rax,32; je fufs_measure_ok` (4 bytes * 8px/byte, the library's own documented per-byte advance, regardless of byte value -- proves 'not garbage' for the function the issue text actually names) else `add rbx,4`. CHECK 4 (fufs_bitmap_ok): `sub rsp,16` (16-byte scratch out_ptr; 16 is itself 16-aligned so rsp%16==0 is preserved across this call with no extra pad); rdi=mov 0xFFFFFFFF freshly reloaded (NOT read back from CHECK 1's r8 -- r8 is caller-save and font_measure_text's own body documents clobbering r8 in CHECK 3, so it does not survive; font_glyph_bitmap's own bound check is `cmp rdi,256; jae -ENOENT`, so any value >=256 including this sentinel takes that path), rsi=rsp, rdx=16; call font_glyph_bitmap -> rax; `add rsp,16`; r9=mov 0xFFFFFFFFFFFFFFFE (-ENOENT, the exact literal spelling src/font_api.pdx's own `font_glyph_bitmap` uses); `cmp rax,r9; je fufs_bitmap_ok` else `add rbx,8`. Return: rax=rbx (fail-bitmask); pop rbx; ret. No test mnemonic. No `and` on r8-r15. No 2-op imul, no neg, no sil/dil/bl. Reserved-label prefix fufs_.",
+      block: {
+        push rbx;
+        mov rbx, 0;
+
+        // --- decode the 4-byte UTF-8 sequence into r11 (expect 0x1F600) ---
+        lea r10, [rip + fufs_utf8_bytes];
+
+        xor rax, rax;
+        mov_b rax, [r10 + 0];
+        and rax, 0x07;
+        shl rax, 18;
+        mov r11, rax;
+
+        xor rax, rax;
+        mov_b rax, [r10 + 1];
+        and rax, 0x3F;
+        shl rax, 12;
+        add r11, rax;
+
+        xor rax, rax;
+        mov_b rax, [r10 + 2];
+        and rax, 0x3F;
+        shl rax, 6;
+        add r11, rax;
+
+        xor rax, rax;
+        mov_b rax, [r10 + 3];
+        and rax, 0x3F;
+        add r11, rax;
+
+        // --- CHECK 1: font_lookup_glyph(decoded cp) == FONT_API_GLYPH_ABSENT ---
+        mov rdi, r11;
+        call font_lookup_glyph;
+        mov r8, 0xFFFFFFFF;
+        cmp rax, r8;
+        je fufs_absent_ok;
+        add rbx, 1;
+      fufs_absent_ok:
+
+        // --- CHECK 2: boundary -- font_lookup_glyph(0x80) == 0x80 (in-range) ---
+        mov rdi, 0x80;
+        call font_lookup_glyph;
+        cmp rax, 0x80;
+        je fufs_boundary_ok;
+        add rbx, 2;
+      fufs_boundary_ok:
+
+        // --- CHECK 3: font_measure_text(raw 4 UTF-8 bytes) == 32 (sane, not garbage) ---
+        lea rdi, [rip + fufs_utf8_bytes];
+        mov rsi, 4;
+        call font_measure_text;
+        cmp rax, 32;
+        je fufs_measure_ok;
+        add rbx, 4;
+      fufs_measure_ok:
+
+        // --- CHECK 4: font_glyph_bitmap(FONT_API_GLYPH_ABSENT, ...) fails -ENOENT, not garbage ---
+        sub rsp, 16;
+        mov rdi, 0xFFFFFFFF;          // FONT_API_GLYPH_ABSENT -- reloaded fresh (r8 is
+                                       // caller-save; font_measure_text's own body
+                                       // documents clobbering r8, so CHECK 1's r8 value
+                                       // does not survive CHECK 3's call)
+        mov rsi, rsp;
+        mov rdx, 16;
+        call font_glyph_bitmap;
+        add rsp, 16;
+        mov r9, 0xFFFFFFFFFFFFFFFE;
+        cmp rax, r9;
+        je fufs_bitmap_ok;
+        add rbx, 8;
+      fufs_bitmap_ok:
+
+        mov rax, rbx;
+        pop rbx;
+        ret
+      }
+    }
+}

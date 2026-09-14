@@ -1,0 +1,177 @@
+// tests/font_layout_smoke.pdx — libpdx-font R102.M4-003
+// (Closes libpdx-font#9)
+//
+// FontLayoutSmoke::font_layout_smoke_run lays out "Hello\nWorld"
+// through FontLayout::font_layout_text (src/font_layout.pdx) and
+// asserts three specific emitted triplets land exactly where the
+// fixed-advance / newline-reset contract says they must: 'H' at
+// (0,0), 'e' at (8,0) — one 8px advance in — and 'W' at (0,16), the
+// first glyph after the embedded '\n' resets x back to its starting
+// value and advances y by one 16px line.
+//
+// ==============================================================================
+// Layout arithmetic (documented once here rather than re-derived
+// inline at each check site)
+// ==============================================================================
+//
+// Input: "Hello\nWorld" — 11 bytes (H,e,l,l,o,\n,W,o,r,l,d). Starting
+// xy0_packed = 0 (x0 = 0, y0 = 0). font_layout_text emits one 24-byte
+// (x, y, glyph_id) triplet per NON-newline byte (module header of
+// src/font_layout.pdx), so the 10 emitted triplets and their
+// zero-based indices are:
+//
+//   idx  byte  x    y    glyph_id
+//    0   'H'    0    0    0x48
+//    1   'e'    8    0    0x65
+//    2   'l'   16    0    0x6C
+//    3   'l'   24    0    0x6C
+//    4   'o'   32    0    0x6F
+//   (byte 5 is '\n': no triplet emitted; cur_x resets to x0=0,
+//    cur_y advances by FONT_LAYOUT_ADVANCE_Y=16 to 16)
+//    5   'W'    0   16    0x57
+//    6   'o'    8   16    0x6F
+//    7   'r'   16   16    0x72
+//    8   'l'   24   16    0x6C
+//    9   'd'   32   16    0x64
+//
+// op_count (font_layout_text's return value) is therefore 10, not 11
+// — the embedded newline consumes an input byte without producing a
+// triplet. This file checks op_count plus triplet[0] ('H'), triplet[1]
+// ('e' — one advance past 'H', still on line 0), and triplet[5] ('W'
+// — the first post-newline glyph, back at x=0 on line 1) rather than
+// all ten, since those three fully exercise every piece of the
+// contract under test (initial position, single fixed advance, and
+// the newline reset+advance) without re-deriving the mechanically
+// identical remaining seven.
+//
+// ==============================================================================
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// ==============================================================================
+//   - Module FontLayoutSmoke (PascalCase basename matches
+//     tests/font_layout_smoke.pdx).
+//   - Zero-argument function; within the <= 4 curried-args cap.
+//   - No test mnemonic; every branch via cmp reg, imm or cmp reg, reg.
+//   - Every `cmp` immediate is small and positive (0, 8, 16, 0x48,
+//     0x57, 0x65, 10) — well under 0x7FFFFFFF; no sign-extension
+//     hazard for any of them (contrast the all-Fs sentinels
+//     tests/font_utf8_fallback_smoke.pdx's own header explains).
+//   - No `and`, no 2-op imul, no neg, no sil/dil/bl aliases.
+//   - `sub rsp, 8` / `add rsp, 8` brackets the one nested call
+//     (`font_layout_text`) — entry rsp%16==8, the 8-byte pad lands
+//     rsp%16==0 at the call site, matching `font_glyph_bitmap`'s own
+//     established pad-only (no accompanying register push) shape in
+//     src/font_api.pdx.
+//   - This function touches ONLY caller-save registers throughout
+//     (rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11) — no callee-save
+//     register (rbx, r12-r15, rbp) is ever read or written, so no
+//     push/pop is needed to satisfy the SysV callee-save contract;
+//     the fail-bitmask accumulator (r11) is deliberately initialised
+//     AFTER the one call returns (font_layout_text's own body
+//     documents clobbering r11 internally as its x0 constant), never
+//     relied upon to survive across it.
+//   - Fail-bitmask bits (1/2/4/8) are pairwise disjoint, so `add r11,
+//     N` accumulates safely without depending on an `or` encoding.
+//   - Reserved-label discipline: every branch label below is prefixed
+//     `fls_` (disjoint from `font_api_` / `font_8x16_` /
+//     `font_layout_` / `font_metrics_` / `font_schema_` / `fes_` /
+//     `fufs_` / `loop`/`if`).
+//   - Every `pub let` name here checked against Font8x16 / FontApi /
+//     FontLayout / FontMetrics / FontSchema / FontEquivalenceSmoke /
+//     FontUtf8FallbackSmoke for global-symbol uniqueness (flat link
+//     namespace).
+
+module FontLayoutSmoke = structure {
+
+  pub let fls_text     : [u8; 12] = "Hello\nWorld\0"
+  pub let fls_text_len : u64 = 11
+
+  // len*24 = 11*24 = 264 bytes — the safe upper bound
+  // src/font_layout.pdx's own module header documents (a newline byte
+  // only ever reduces the actual triplet count relative to this
+  // bound, never increases it).
+  pub let mut fls_out_ops : [u8; 264] = uninit @align(8)
+
+  pub let FLS_FAIL_OPCOUNT   : u64 = 1   // bit 0
+  pub let FLS_FAIL_H_TRIPLET : u64 = 2   // bit 1
+  pub let FLS_FAIL_E_TRIPLET : u64 = 4   // bit 2
+  pub let FLS_FAIL_W_TRIPLET : u64 = 8   // bit 3
+
+  // ============================================================================
+  // font_layout_smoke_run() -> u64
+  //
+  //   rax (out) = fail-bitmask (OR of FLS_FAIL_* bits above); 0 ==
+  //         every check passed.
+  //
+  // Register plan: no push/pop at all (see file header — this
+  // function touches only caller-save registers throughout); `sub
+  // rsp, 8` / `add rsp, 8` brackets the one nested call.
+  // ============================================================================
+  pub let font_layout_smoke_run : () -> u64 !{mem} @{} =
+    fn () -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M4-003 (Closes libpdx-font#9): font_layout_smoke_run. `sub rsp,8` (entry rsp%16==8, pad lands rsp%16==0 at the nested call, no register push needed — same pad-only shape src/font_api.pdx's font_glyph_bitmap already establishes) then rdi=lea(fls_text), rsi=11, rdx=0 (xy0_packed, x0=0/y0=0 packed), rcx=lea(fls_out_ops); call font_layout_text -> rax=op_count; `add rsp,8` restores. r11=0 (fail-bitmask, initialised only AFTER the call returns — font_layout_text's own body documents clobbering r11 internally as its x0 constant, so this function never relies on r11 surviving the call). CHECK OPCOUNT: `cmp rax,10; je fls_opcount_ok` else `add r11,1` (see file header layout-arithmetic table: 11 input bytes minus 1 newline byte that emits no triplet = 10). CHECK H (triplet[0], offsets 0/8/16 in fls_out_ops): three `mov r8/r9/r10,[rip+fls_out_ops+K]` qword loads (the buffer is a raw byte array; font_layout_text's own body already writes raw qwords into it at these exact triplet-stride offsets, so reading back the same width at the same offsets is the exact symmetric operation); `cmp r8,0; jne fls_h_fail; cmp r9,0; jne fls_h_fail; cmp r10,0x48; je fls_h_ok` else (fls_h_fail) `add r11,2`. CHECK E (triplet[1], offsets 24/32/40): same shape, expected (8, 0, 0x65) — one FONT_LAYOUT_ADVANCE_X (8) past 'H', still cur_y=0 — else `add r11,4`. CHECK W (triplet[5], offsets 120/128/136 — 5*24=120): same shape, expected (0, 16, 0x57) — the first post-newline glyph, cur_x reset to x0=0 and cur_y advanced by one FONT_LAYOUT_ADVANCE_Y (16) — else `add r11,8`. Return: rax=r11; ret. No push/pop anywhere (no callee-save register touched — see file header). No test mnemonic. No `and`, no 2-op imul, no neg, no sil/dil/bl. Reserved-label prefix fls_.",
+      block: {
+        sub rsp, 8;
+
+        lea rdi, [rip + fls_text];
+        mov rsi, 11;
+        mov rdx, 0;
+        lea rcx, [rip + fls_out_ops];
+        call font_layout_text;
+
+        add rsp, 8;
+
+        mov r11, 0;
+
+        cmp rax, 10;
+        je fls_opcount_ok;
+        add r11, 1;
+      fls_opcount_ok:
+
+        // --- triplet[0] = 'H' at (0, 0) ---
+        mov r8, [rip + fls_out_ops + 0];
+        mov r9, [rip + fls_out_ops + 8];
+        mov r10, [rip + fls_out_ops + 16];
+        cmp r8, 0;
+        jne fls_h_fail;
+        cmp r9, 0;
+        jne fls_h_fail;
+        cmp r10, 0x48;
+        je fls_h_ok;
+      fls_h_fail:
+        add r11, 2;
+      fls_h_ok:
+
+        // --- triplet[1] = 'e' at (8, 0) ---
+        mov r8, [rip + fls_out_ops + 24];
+        mov r9, [rip + fls_out_ops + 32];
+        mov r10, [rip + fls_out_ops + 40];
+        cmp r8, 8;
+        jne fls_e_fail;
+        cmp r9, 0;
+        jne fls_e_fail;
+        cmp r10, 0x65;
+        je fls_e_ok;
+      fls_e_fail:
+        add r11, 4;
+      fls_e_ok:
+
+        // --- triplet[5] = 'W' at (0, 16) -- first glyph post-newline ---
+        mov r8, [rip + fls_out_ops + 120];
+        mov r9, [rip + fls_out_ops + 128];
+        mov r10, [rip + fls_out_ops + 136];
+        cmp r8, 0;
+        jne fls_w_fail;
+        cmp r9, 16;
+        jne fls_w_fail;
+        cmp r10, 0x57;
+        je fls_w_ok;
+      fls_w_fail:
+        add r11, 8;
+      fls_w_ok:
+
+        mov rax, r11;
+        ret
+      }
+    }
+}

@@ -1,4 +1,4 @@
-# manifest.pdxsig — libpdx-font 0.5.0
+# manifest.pdxsig — libpdx-font 1.0.0-src
 #
 # Unsigned source-form placeholder. Dual-signed manifest per
 # design/tooling/plan.md §D4 + §6.2 (identical policy to D1.a for
@@ -6,8 +6,18 @@
 # their own pre-1.0 milestones. ML-DSA-65 signatures over the
 # canonicalised {name, version, kind, sources[], deps[], caps_decl,
 # changelog, build_hash} tuple land at `paideia-as release --sign`
-# time; this repo has not reached a signed release yet (0.5.0 closes
-# M1+M2 of the five-milestone plan; M5 is the signed 1.0.0).
+# time; this repo has not been through that signing pass yet.
+#
+# 1.0.0-src (this commit, R102.M5-002 / libpdx-font#11) closes M5 of
+# the five-milestone plan — the last unsigned source-form milestone.
+# The `-src` git tag suffix (v1.0.0-src, not v1.0.0) marks that this
+# is the source tree a real 1.0.0 release will be cut from once
+# `paideia-as release --sign` populates Record 1 (author) and the
+# signing bot (T-INFRA-002) populates Record 2 (paideia-root) below —
+# same walk-back posture this wave's design/rescue-plan.md (paideia-
+# os/doc repo) documents for the org's marker-vs-signed-release gap.
+# Until both records are populated, `pkg install` refuses this
+# package unless `--from-source` (D4 fallback) is passed.
 #
 # Layout: two ML-DSA-65 signatures (3309 bytes each per NIST FIPS 204)
 # packed as a 16-byte record header + two length-prefixed sig blobs +

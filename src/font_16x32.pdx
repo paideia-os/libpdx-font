@@ -1,0 +1,160 @@
+// src/font_16x32.pdx — libpdx-font R102.M5-001 (Closes libpdx-font#10)
+//
+// Embedded 16x32 bitmap glyph store: a 16384-byte .rodata blob (256
+// glyphs x 32 rows x 2 bytes/row) plus a leaf accessor
+// font_16x32_bitmap_ptr(cp) that returns the rip-relative address of
+// one glyph's 64-byte row table. Mirrors Font8x16's shape exactly
+// (src/font_8x16.pdx) at double the linear resolution.
+//
+// ==============================================================================
+// Provenance — nearest-neighbor 2x scale-up of Font8x16, and a byte-
+// count correction against the issue text
+// ==============================================================================
+//
+// The issue asks for "a scaled-up copy of 8x16 (nearest-neighbor 2x)"
+// and states the store is "4096-byte 16x32 glyph store (128 printable
+// ASCII x 64 bytes each)". Those two figures are internally
+// inconsistent (128 * 64 = 8192, not 4096) and neither matches what a
+// faithful 2x scale of Font8x16 actually requires:
+//
+//   - A 16x32 glyph cell is 2 bytes/row (16 pixels) x 32 rows =
+//     64 bytes/glyph — this part of the issue text is right.
+//   - Font8x16 (this repo's only existing face) indexes 256 glyphs
+//     directly by codepoint over [0, 256), matching FontApi::
+//     font_lookup_glyph's / font_glyph_bitmap's identity-mapping
+//     contract. Truncating the scaled-up face to 128 glyphs would
+//     silently break that same direct-index contract for a future
+//     Font16x32-backed API path (codepoints 128..255 would have no
+//     scaled glyph to return), for a saving of exactly 8192 bytes of
+//     .rodata — not worth the asymmetry.
+//
+// This module therefore ships the full 256-glyph scale-up:
+//   256 glyphs x 64 bytes/glyph = 16384 bytes total
+// (4x Font8x16's 4096 bytes, matching the 2x-by-2x = 4x area scaling
+// nearest-neighbor implies). The issue's own placeholder fallback
+// ("ship a small placeholder saying '16x32 face TBD, using 2x-scale
+// of 8x16'") is subsumed by shipping the real scale-up instead of a
+// stub — the scale-up IS "2x-scale of 8x16", just computed rather
+// than described in prose.
+//
+// Scale-up algorithm (applied once, offline, to produce
+// assets/fonts/glyphs_16x32.bin from assets/fonts/glyphs_8x16.bin):
+// for each of Font8x16's 256 glyphs, for each of its 16 row bytes,
+// double every pixel bit horizontally (bit b -> two adjacent bits of
+// value b, MSB-first, producing a 16-bit big-endian row) and emit
+// that doubled row TWICE (vertical 2x) — 16 rows in -> 32 rows out,
+// 1 byte/row in -> 2 bytes/row out. This is a pure nearest-neighbor
+// magnification; no new letterform data is introduced, so
+// Font16x32's glyphs inherit Font8x16's own provenance
+// (src/font_8x16.pdx's header: vendored public-domain Lat15-VGA16
+// glyph pixels) at 2x linear / 4x area resolution. A future issue
+// that vendors real hand-drawn 16x32 letterforms (rather than an
+// upscaled 8x16) would replace assets/fonts/glyphs_16x32.bin in
+// place without touching this module's shape.
+//
+// ==============================================================================
+// Layout (identical in spirit to Font8x16's, doubled)
+// ==============================================================================
+//
+// _font_16x32_glyphs : [u8; 16384]
+//   Row-major, glyph-major. Glyph `g`'s 64-byte row table starts at
+//   offset g*64. Within a glyph, bytes at offset (row_idx*2) and
+//   (row_idx*2 + 1) hold the big-endian 16-bit bitmap for row
+//   `row_idx` (0 = top, 31 = bottom): bit 15 (0x8000 of the 16-bit
+//   value, i.e. bit 7 of the first byte) is the leftmost pixel; bit 0
+//   (of the second byte) is the rightmost. A set bit is foreground,
+//   matching Font8x16's polarity convention.
+//
+// @align(64) — same cacheline rationale as Font8x16: 64 bytes/glyph
+// is exactly one cacheline, so no glyph's row table ever straddles a
+// cacheline boundary and no glyph-row load can straddle within a
+// single row either (2-byte row reads never cross a cacheline given
+// 64-byte glyph alignment).
+//
+// ==============================================================================
+// font_16x32_bitmap_ptr(cp) — leaf accessor
+// ==============================================================================
+//
+// Contract: returns the address of glyph `cp`'s 64-byte row table
+// (NOT a dereferenced byte). Caller must pass cp in [0..256); out-of-
+// range cp walks off the 16384-byte array into whatever .rodata
+// neighbor lives next — same undefined-but-non-faulting posture
+// Font8x16::font_8x16_bitmap_ptr documents for its own out-of-range
+// case. Bounds-check discipline lives with the caller, mirroring
+// FontApi::font_glyph_bitmap's cp < 256 check ahead of Font8x16's
+// accessor.
+//
+// Address arithmetic: addr = &_font_16x32_glyphs + cp * 64
+//                          = &_font_16x32_glyphs + (cp << 6)
+//
+// Register discipline: leaf, no push/pop. SysV caller-save clobbers
+// only (rax, rdi). rdi's post-return value is undefined (SysV
+// caller-save).
+//
+// ==============================================================================
+// Instruction floor
+// ==============================================================================
+//
+// - lea r64, [rip + sym]      (R11 encoder)
+// - shl r64, imm8             (R11 encoder)
+// - add r64, r64              (R11 encoder)
+//
+// paideia-as compliance (feedback_pdx_encoder_pitfalls)
+// -------------------------------------------------------
+//   - Module Font16x32 (PascalCase basename matches src/font_16x32.pdx).
+//   - Leaf: no push/pop parity to preserve, no nested calls.
+//   - No test mnemonic, no cmp at all in this accessor (unconditional
+//     address math only).
+//   - No `and reg, imm64`. No 2-op imul (glyph*64 done via shl by 6).
+//   - Every pub let name here (FONT_16X32_*, _font_16x32_glyphs,
+//     font_16x32_bitmap_ptr) checked against every other module in
+//     this repo for global-symbol uniqueness — flat link namespace,
+//     same discipline Font8x16's own header documents.
+
+module Font16x32 = structure {
+
+  // Byte counts (documentation constants; instruction body below uses
+  // a literal immediate with a trailing comment, matching the house
+  // convention — see Font8x16 / fb_font.pdx / SchemaEmit::SCHEMA_MAX).
+  pub let FONT_16X32_GLYPHS      : u64 = 256
+  pub let FONT_16X32_ROWS_PER    : u64 = 32
+  pub let FONT_16X32_COLS_PER    : u64 = 16
+  pub let FONT_16X32_TOTAL_BYTES : u64 = 16384
+
+  // ==========================================================================
+  // _font_16x32_glyphs: 16384-byte embedded font blob (.rodata).
+  // ==========================================================================
+  //
+  // Path is relative to this .pdx file's directory (src/), same
+  // resolution policy Font8x16 documents:
+  //
+  //   src/font_16x32.pdx                <-- this file
+  //   assets/fonts/glyphs_16x32.bin      <-- the blob
+  //
+  //   Relative from this file's dir: ../assets/fonts/glyphs_16x32.bin
+  //
+  // `pub` so downstream fixtures can assert its presence/size via
+  // `nm`, mirroring Font8x16's own pub-symbol rationale.
+  pub let _font_16x32_glyphs : [u8; 16384] = @include_bytes("../assets/fonts/glyphs_16x32.bin") @align(64)
+
+  // ==========================================================================
+  // font_16x32_bitmap_ptr(cp) -> u64
+  // ==========================================================================
+  //
+  // Return the address of the 64-byte row table for glyph `cp`.
+  //
+  //   rdi (in)  = cp — codepoint / glyph index, expected in [0..256)
+  //   rax (out) = &_font_16x32_glyphs + cp*64
+  // ==========================================================================
+  pub let font_16x32_bitmap_ptr : (u64) -> u64 !{mem} @{} =
+    fn (cp: u64) -> unsafe {
+      effects: {mem}, capabilities: {},
+      justification: "libpdx-font R102.M5-001 (Closes libpdx-font#10): font_16x32_bitmap_ptr returns the rip-relative address of glyph `cp`'s 64-byte row table in _font_16x32_glyphs, mirroring Font8x16::font_8x16_bitmap_ptr's shape at double pitch. Address math: lea rax, [rip + _font_16x32_glyphs] loads the blob base; shl rdi, 6 computes cp*64 (glyph pitch is 64 bytes, so a left-shift-by-6 replaces a multiply — no 2-op imul, per feedback_pdx_encoder_pitfalls); add rax, rdi adds the offset. Leaf: no push/pop, no nested calls, no branch labels (so no reserved-label prefix discipline applies). Caller-save only (rax, rdi touched; rdi's post-return value is undefined per SysV caller-save convention). Bounds discipline: cp >= 256 walks past the 16384-byte array end into whatever .rodata neighbor follows in the linked object — same undefined-but-non-faulting posture Font8x16::font_8x16_bitmap_ptr documents for its own out-of-range case. This accessor does not bounds-check; a future Font16x32-backed FontApi entry point would be the caller responsible for checking cp < 256 first, same division of responsibility FontApi::font_glyph_bitmap already applies ahead of Font8x16's accessor.",
+      block: {
+        lea rax, [rip + _font_16x32_glyphs];
+        shl rdi, 6;                          // cp * 64 (glyph pitch)
+        add rax, rdi;
+        ret
+      }
+    }
+}

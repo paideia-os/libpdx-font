@@ -25,6 +25,10 @@ Per the plan, this repo lands across five milestones:
 - **M3** — FontMetricsRecord@0.1 emission (schema-registry integration when it lands; fallback-line-based until then)
 - **M4** — smokes: bit-exact glyph equivalence to kernel-console, UTF-8-out-of-range fallback, per-line layout correctness
 - **M5** — second face (16x32) landed as font_open('default-large'); signed 1.0.0 release
+  — `src/font_16x32.pdx` (`Font16x32`) ships the 16x32 glyph store; a
+  `font_open('default-large')` selector API is future follow-up (not
+  wired in this landing). 1.0.0 ships as unsigned source form
+  (`v1.0.0-src`) pending a real `paideia-as release --sign` pass.
 
 Every issue is filed against one of these five milestones; see the Issues tab.
 

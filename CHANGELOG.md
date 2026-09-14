@@ -5,6 +5,35 @@ in the paideia-os repo). The 0.5.0 line closes Milestones M1 and M2 of the
 five-milestone plan in this repo's README; every subsequent entry adds one
 line to the top under the same shape.
 
+## 1.0.0-src — 2026-09-13
+
+Wave FFF: M5 close, landing the second face + the unsigned 1.0.0
+source-form manifest, closing libpdx-font#10 and #11.
+
+### Landed
+
+- **libpdx-font#10 (R102.M5-001) — 16x32 face.** `src/font_16x32.pdx`
+  (`Module Font16x32`) adds a 16384-byte embedded glyph store (256
+  glyphs x 64 bytes/glyph) plus `font_16x32_bitmap_ptr(cp) -> u64`,
+  mirroring `Font8x16`'s shape at double pitch. Ships as a real
+  nearest-neighbor 2x scale-up of `Font8x16`'s existing 256-glyph
+  Lat15-VGA16 data (`assets/fonts/glyphs_16x32.bin`, generated
+  offline from `assets/fonts/glyphs_8x16.bin`) rather than the
+  issue's suggested placeholder text — the scale-up IS "2x-scale of
+  8x16". **Byte-count correction against the issue text**: the issue
+  states "4096-byte... 128 printable ASCII x 64 bytes each", which is
+  internally inconsistent (128*64 = 8192) and undercounts a faithful
+  2x scale-up, which needs the full 256-glyph coverage `Font8x16`
+  already ships (to preserve `FontApi`'s direct codepoint-index
+  contract) at 64 bytes/glyph = 16384 bytes total. Full provenance
+  and arithmetic writeup lives in `src/font_16x32.pdx`'s own header.
+- **libpdx-font#11 (R102.M5-002) — signed 1.0.0 release (source
+  form).** `manifest.pdxsig` and `VERSION` bump to 1.0.0-src, closing
+  M5 — the last unsigned milestone of the five-milestone plan.
+  `manifest.pdxsig` now documents the `-src` tag convention and the
+  two-record signing gap (author + paideia-root) that a future real
+  signing pass fills in; see that file's header for detail.
+
 ## 0.6.0 — 2026-09-13
 
 Wave CC follow-up: M3 schema-registry integration (WEAK stub) + first
